@@ -23,6 +23,20 @@ All notable changes to meowcaller, tracked per module. Format loosely follows
   Business), iPhone, and web callers; the live relay hop has no KAT vector,
   matching the validation state of the existing relay code.
 
+### meowcaller — start inbound media on the offer so a late Answer keeps inbound audio
+- The relay only bridged the caller's audio when our allocation followed the offer
+  closely; answering a 1:1 call after ~2 s left it with outbound audio only (related
+  to #37/#40). `onOffer` now starts media right away while the call stays `ringing`;
+  `maybeStartMedia` no longer moves a ringing inbound call to `connecting`.
+- A `mute_v2` that arrives while ringing is recorded and `Answer` sends the deferred
+  `<accept>` from it. The first inbound RTP before Answer is recorded too, and
+  whichever of Answer / first RTP comes second marks the call active, decided under
+  the engine lock (new `engineCall.answered`, `onFirstInboundRTP`).
+- Unit tests: `TestFirstInboundRTPWhileRingingWaitsForAnswer`,
+  `TestFirstInboundRTPAfterAnswerActivates`, `TestMuteV2WhileRingingIsKeptForAnswer`.
+  Starting media on the offer was live-checked in our integration (inbound calls
+  answered several seconds after the offer carry the caller's audio); the lock-ordered
+  handoff is newer and covered by the unit tests above only.
 
 ### media/group-runtime — `KAT-verified`
 
