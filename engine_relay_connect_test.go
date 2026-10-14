@@ -271,3 +271,14 @@ func TestFanoutRepliesOnTheReceivingRelay(t *testing.T) {
 		t.Fatal("SendTo accepted an unknown relay index")
 	}
 }
+
+func TestMediaRecvErrorAfterCancelIsNormalEnd(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := mediaRecvError(ctx, errFanoutClosed); mediaEndedNormally(err) || !errors.Is(err, errFanoutClosed) {
+		t.Fatalf("live ctx: err = %v, want a relay recv error", err)
+	}
+	cancel()
+	if err := mediaRecvError(ctx, errFanoutClosed); !mediaEndedNormally(err) {
+		t.Fatalf("cancelled ctx: err = %v, want a normal end", err)
+	}
+}

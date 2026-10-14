@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -108,7 +109,11 @@ func (e *engine) maybeStartMedia(callID string) {
 	go func() {
 		defer clear(callKey)
 		if err := e.runMedia(mctx, callID, call, callKey, selfLID, peerLID, rd, inbound); err != nil {
-			e.c.log.Warn().Err(err).Str("call_id", callID).Msg("media ended")
+			if mediaEndedNormally(err) {
+				e.c.log.Debug().Err(err).Str("call_id", callID).Msg("media ended")
+			} else {
+				e.c.log.Warn().Err(err).Str("call_id", callID).Msg("media ended")
+			}
 		}
 		e.allowMediaRestart(mctx, cancel, callID, m)
 	}()
@@ -310,6 +315,20 @@ func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEn
 		"stream_ssrcs": streamSsrcs,
 	})
 	return ch, allocate, nil
+}
+
+// mediaRecvError maps a receive error: once ctx is done the fanout was closed on
+// purpose (call ended), so the result is ctx's error, not a relay failure.
+func mediaRecvError(ctx context.Context, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	return fmt.Errorf("relay recv: %w", err)
+}
+
+// mediaEndedNormally reports whether runMedia ended because the call ended.
+func mediaEndedNormally(err error) bool {
+	return errors.Is(err, context.Canceled)
 }
 
 // closeFanoutOnCancel closes f when ctx is done; call the returned func to stop.
@@ -1059,7 +1078,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		}
 		n, src, err := ch.RecvFrom(buf)
 		if err != nil {
-			return fmt.Errorf("relay recv: %w", err)
+			return mediaRecvError(ctx, err)
 		}
 		currentRosterGeneration, activeReceivers := audioReceivers.ActiveReceiverSnapshot()
 		if !hasRosterGeneration || currentRosterGeneration != rosterGeneration {
