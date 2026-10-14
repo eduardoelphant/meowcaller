@@ -24,15 +24,17 @@ used by the Elphant fork of GOWA
 | `opus/`: minimal cgo binding to libopus | Opus encode and decode for the mode above; needs `libopus` and `pkg-config` at build time |
 | Relay fanout (upstream [PR #26](https://github.com/purpshell/meowcaller/pull/26) by pedrobartolini, commit `340c889` only, cherry-picked with its author) | Phones move their uplink to another offered relay after election; binding one relay lost the caller's audio. Binds every offered `te2`, merges receives behind an (SSRC, seq) replay filter, answers latency probes only for offered relays |
 | Media on the offer (upstream [PR #43](https://github.com/purpshell/meowcaller/pull/43) by michsantoz, cherry-picked with its author) | Answering more than about 2 s after the offer lost inbound audio; media now starts while ringing, and an early `mute_v2` and first RTP are applied on Answer. Test imports switched from `hypermeow` to `go.mau.fi/whatsmeow` |
-| Instrumentation (`engine.go`, `engine_media.go`, `engine_relay_log.go`) | Info logs for the offer's relay list (`relay_name`, `is_fna`, `c2r_rtt`; never tokens), relay updates, latency probes echoed or skipped, `mute_v2` toggles, and a 10 s media counter line (peer RTP, peer RTCP, our RTP sent, last peer SR `packet_count`) |
+| Stale offer gate (upstream PR #26 commit `3494d98` by pedrobartolini, cherry-picked with its author) | Offers replayed from the offline queue older than 90 s (`e` attribute) are ignored |
+| Fixes on top of PR #26 and #43 (`engine_media.go`, `engine_relay_fanout.go`, `engine.go`) | Abandoned or cancelled relay connects close their channel; relays connect in parallel; the fanout closes as soon as the call ends; latency probes are echoed only for relays the fanout bound; media that ends while ringing can be restarted by Answer; binding-success goes back on the relay that asked |
+| Instrumentation (`engine.go`, `engine_media.go`, `engine_relay_log.go`) | Info logs for the offer's relay list (`relay_name`, `is_fna`, `c2r_rtt`; never tokens), relay updates, latency probes echoed or skipped, `mute_v2` toggles, and a 10 s media counter line (peer RTP raw and after the replay filter, peer RTCP, our RTP sent, last peer SR `packet_count`) |
 | `WithOfferFilter` option (`logging.go`, `engine.go`) | Lets GOWA leave an offer (1:1 or group) to another stack: no preaccept, no handler, no state |
 | `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
 
 ## Versions
 
 - `v0.1.0-elphant.1`: FFT twiddle cache, dither, Opus mode and the libopus binding.
-- `v0.2.0-elphant.1`: relay fanout (PR #26), media on the offer (PR #43), instrumentation,
-  `WithOfferFilter` and the `!cgo` Opus stub.
+- `v0.2.0-elphant.1`: relay fanout and stale offer gate (PR #26), media on the offer (PR #43),
+  fixes on top of both, instrumentation, `WithOfferFilter` and the `!cgo` Opus stub.
 
 ## Syncing with upstream
 
