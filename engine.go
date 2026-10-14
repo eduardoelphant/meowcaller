@@ -36,6 +36,7 @@ type engine struct {
 	calls           map[string]*engineCall // keyed by call-id
 	sendCallNode    func(context.Context, waBinary.Node) error
 	requestCallNode func(context.Context, waBinary.Node, string) (*waBinary.Node, error)
+	decryptCallKey  func(context.Context, *events.CallOffer) ([]byte, error)
 	rawCallHookErr  error
 }
 
@@ -90,6 +91,9 @@ func newEngine(c *Client) *engine {
 	if c != nil && c.wa != nil {
 		e.sendCallNode = func(ctx context.Context, node waBinary.Node) error {
 			return c.wa.DangerousInternals().SendNode(ctx, node)
+		}
+		e.decryptCallKey = func(ctx context.Context, ev *events.CallOffer) ([]byte, error) {
+			return decryptInboundCallKey(ctx, c.wa, ev)
 		}
 		e.requestCallNode = func(ctx context.Context, node waBinary.Node, requestID string) (*waBinary.Node, error) {
 			di := c.wa.DangerousInternals()
@@ -514,6 +518,10 @@ func (e *engine) placeCall(ctx context.Context, target string, opts CallOptions)
 // preparation step, independent of the later Answer/Reject), and fires the
 // OnIncomingCall listener. Only the <accept> is deferred to Answer.
 func (e *engine) onOffer(ev *events.CallOffer) {
+	if fn := e.c.offerFilter; fn != nil && !fn(ev) {
+		e.c.log.Debug().Str("call_id", ev.CallID).Msg("offer rejected by offer filter; ignoring")
+		return
+	}
 	// Source of truth: https://github.com/purpshell/meowcaller/blob/33854919e64bdd4b053054ac9764d8fc63027b57/datasheets/voip-group-invite-accept.md#L28-L40
 	groupSnapshot, isGroup, groupErr := signaling.ParseGroupInviteSnapshot(ev.Data)
 	if groupErr != nil {
@@ -534,7 +542,11 @@ func (e *engine) onOffer(ev *events.CallOffer) {
 		return
 	}
 
-	callKey, err := decryptInboundCallKey(context.Background(), e.c.wa, ev)
+	if e.decryptCallKey == nil {
+		e.c.log.Warn().Str("call_id", ev.CallID).Msg("decrypt callKey unavailable")
+		return
+	}
+	callKey, err := e.decryptCallKey(context.Background(), ev)
 	if err != nil {
 		e.c.log.Warn().Err(err).Str("call_id", ev.CallID).Msg("decrypt callKey failed")
 		return
@@ -669,7 +681,7 @@ func (e *engine) sendPreaccept(callID string, to, creator types.JID, video bool)
 		[]string{"16000"},
 		video,
 	)
-	if err := e.c.wa.DangerousInternals().SendNode(context.Background(), pre); err != nil {
+	if err := e.transmitCallNode(context.Background(), pre); err != nil {
 		return fmt.Errorf("send preaccept: %w", err)
 	}
 	e.c.log.Info().Str("call_id", callID).Msg("preaccepted (preparation; awaiting Answer/Reject)")

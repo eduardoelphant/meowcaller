@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
 )
 
 // Client is the managed entry point to the WhatsApp calling stack. It wraps a
@@ -23,6 +24,8 @@ type Client struct {
 	log  zerolog.Logger
 	diag *diag.Recorder
 	eng  *engine
+
+	offerFilter func(*events.CallOffer) bool
 
 	getGroupInfo func(context.Context, types.JID) (*types.GroupInfo, error)
 	ownGroupJIDs func() []types.JID
@@ -53,6 +56,7 @@ func NewClient(wa *whatsmeow.Client, opts ...Option) *Client {
 	cfg := resolveConfig(opts)
 	c := &Client{
 		wa: wa, log: cfg.log, diag: cfg.diag,
+		offerFilter:  cfg.offerFilter,
 		getGroupInfo: wa.GetGroupInfo,
 		ownGroupJIDs: func() []types.JID {
 			return []types.JID{wa.Store.GetJID(), wa.Store.GetLID()}
