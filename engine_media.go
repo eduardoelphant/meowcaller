@@ -894,6 +894,28 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		}
 	}()
 
+	// Periodic media counters (every 10 s while media runs) so a one-way-audio call
+	// is visible in Info logs without per-packet lines.
+	var statPeerRTP, statPeerRTPDecoded, statPeerRTCP, statPeerSRPackets atomic.Uint64
+	go func() {
+		t := time.NewTicker(mediaStatsInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			}
+			log.Info().
+				Uint64("peer_rtp", statPeerRTP.Load()).
+				Uint64("peer_rtp_decoded", statPeerRTPDecoded.Load()).
+				Uint64("peer_rtcp", statPeerRTCP.Load()).
+				Uint32("our_rtp_sent", txPipe.SenderStats().PacketsSent).
+				Uint64("peer_sr_packet_count", statPeerSRPackets.Load()).
+				Msg("media counters")
+		}
+	}()
+
 	buf := make([]byte, 1500)
 	rtpDedup := newRtpReplayFilter()
 	var rtpIn, rtpSeen, unprotectFail, rtpInspect, vidIn, appDataIn, appDataUnprotectFail, videoUnprotectFail, videoFrameIn, videoSinkMissing, rtcpIn, rtcpAuthFail, groupForwardingInvalid uint64
@@ -957,6 +979,10 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			if rtcpIn++; rtcpIn == 1 {
 				log.Info().Uint32("ssrc", senderSsrc).Uint32("index", index).Msg("first authenticated peer SRTCP received")
 			}
+			statPeerRTCP.Store(rtcpIn)
+			if _, count, ok := rtp.ParseSenderReportPacketCount(plain); ok {
+				statPeerSRPackets.Store(uint64(count))
+			}
 			keyframe := rtp.RtcpRequestsKeyframe(plain, videoSelfSsrc)
 			if keyframe {
 				vsender.requestKeyframe()
@@ -998,6 +1024,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if rtpSeen++; rtpSeen == 1 {
 			log.Info().Int("bytes", n).Msg("first RTP-classified packet from relay, relay is bridging the peer's media")
 		}
+		statPeerRTP.Store(rtpSeen)
 		vh, vok := rtp.ParseRtpHeader(pkt)
 		if vok {
 			if rtpInspect < 20 || vh.PayloadType == rtp.RtpPayloadTypeH264 || vh.PayloadType == rtp.RtpPayloadTypeAppData {
@@ -1220,13 +1247,18 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if playoutLocked {
 			audioPlayoutMu.Unlock()
 		}
-		if rtpIn++; rtpIn == 1 {
+		rtpIn++
+		statPeerRTPDecoded.Store(rtpIn)
+		if rtpIn == 1 {
 			log.Info().Msg("first RTP decoded from relay, inbound audio flowing")
 			e.c.diag.Emit("meta", map[string]any{"event": "first_rtp_in", "call_id": callID})
 			e.onFirstInboundRTP(callID, call)
 		}
 	}
 }
+
+// mediaStatsInterval is the period of the "media counters" Info line.
+const mediaStatsInterval = 10 * time.Second
 
 func prepareWasmRelayStreamSSRCs(
 	streamSSRCs [9]uint32,

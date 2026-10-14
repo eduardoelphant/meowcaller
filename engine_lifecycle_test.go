@@ -583,3 +583,29 @@ func TestFinishCallClosesAttachedAudioDevices(t *testing.T) {
 		t.Fatalf("audio sink close count = %d, want 1", sink.closeCount)
 	}
 }
+
+func TestParseRelayDataReadsC2RRTT(t *testing.T) {
+	addr := []byte{10, 0, 0, 1, 0x0d, 0x96}
+	relay := &waBinary.Node{
+		Tag: "relay",
+		Content: []waBinary.Node{
+			{Tag: "te2", Attrs: waBinary.Attrs{"relay_name": "gru1", "is_fna": "1", "c2r_rtt": "23"}, Content: addr},
+			{Tag: "te2", Attrs: waBinary.Attrs{"relay_name": "gru2"}, Content: addr},
+		},
+	}
+
+	rd := parseRelayData(relay)
+
+	if len(rd.endpoints) != 2 {
+		t.Fatalf("endpoints = %d, want 2", len(rd.endpoints))
+	}
+	if ep := rd.endpoints[0]; ep.relayName != "gru1" || !ep.isFNA || ep.c2rRTT != 23 {
+		t.Fatalf("first endpoint = %+v", ep)
+	}
+	if ep := rd.endpoints[1]; ep.isFNA || ep.c2rRTT != 0 {
+		t.Fatalf("second endpoint = %+v", ep)
+	}
+	if got := relayEndpointNames(rd.endpoints); len(got) != 2 || got[0] != "gru1" || got[1] != "gru2" {
+		t.Fatalf("names = %v", got)
+	}
+}

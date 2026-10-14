@@ -582,7 +582,16 @@ func (e *engine) onOffer(ev *events.CallOffer) {
 		}
 	}
 	e.applyVoipSettingsCodec(m, ev.Data, ev.CallID)
+	offerRelays := m.relay
 	e.mu.Unlock()
+	if offerRelays != nil {
+		e.c.log.Info().Str("call_id", ev.CallID).
+			Int("count", len(offerRelays.endpoints)).
+			Array("relays", relayEndpointsLog(offerRelays.endpoints)).
+			Msg("offer relays")
+	} else {
+		e.c.log.Info().Str("call_id", ev.CallID).Msg("offer carries no relay block")
+	}
 	if isVideo {
 		e.c.log.Info().Str("call_id", ev.CallID).Msg("inbound call advertises video")
 	}
@@ -790,6 +799,10 @@ func (e *engine) onRelay(callID string, data *waBinary.Node) {
 		e.mu.Unlock()
 		return
 	}
+	e.c.log.Info().Str("call_id", callID).
+		Str("stanza", data.Tag).
+		Strs("relay_names", relayEndpointNames(rd.endpoints)).
+		Msg("relay update received")
 	m.relay = rd
 	if !rd.peerJID.IsEmpty() {
 		peerLID = rd.peerJID.String()
@@ -839,6 +852,7 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 	e.mu.Unlock()
 
 	var probes []rlProbe
+	var skipped []string
 	for i := range rl.GetChildren() {
 		te := &rl.GetChildren()[i]
 		if te.Tag != "te" {
@@ -847,7 +861,7 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 		ag := te.AttrGetter()
 		name := ag.String("relay_name")
 		if len(offered) > 0 && !offered[name] {
-			e.c.log.Debug().Str("call_id", ev.CallID).Str("relay_name", name).Msg("skipping latency response for relay outside the offer")
+			skipped = append(skipped, name)
 			continue
 		}
 		probes = append(probes, rlProbe{
@@ -856,6 +870,14 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 			addr:      nodeBytes(te),
 		})
 	}
+	echoed := make([]string, 0, len(probes))
+	for _, p := range probes {
+		echoed = append(echoed, p.relayName)
+	}
+	e.c.log.Info().Str("call_id", ev.CallID).
+		Strs("echoed", echoed).
+		Strs("skipped_outside_offer", skipped).
+		Msg("relaylatency probes received")
 	for _, p := range probes {
 		resp := signaling.BuildRelayLatency(&signaling.RelayLatencyParams{
 			CallID:       ev.CallID,
@@ -1145,10 +1167,15 @@ func (e *engine) onCallRaw(callNode *waBinary.Node) bool {
 			}
 		}
 		if early {
+			e.c.log.Info().
+				Str("call_id", callID).
+				Str("mute_state", muteState).
+				Bool("muted", muted).
+				Msg("mute_v2 while ringing; kept for answer")
 			return false
 		}
 		if !pending {
-			e.c.log.Debug().
+			e.c.log.Info().
 				Str("call_id", callID).
 				Str("mute_state", muteState).
 				Bool("muted", muted).
@@ -1560,6 +1587,7 @@ type relayEndpoint struct {
 	tokenID     uint32
 	authTokenID uint32
 	isFNA       bool
+	c2rRTT      uint32 // client-to-relay RTT the caller measured (ms), 0 if absent
 	addresses   []relayAddress
 }
 
@@ -1634,6 +1662,12 @@ func decodeLatency(enc string) uint32 {
 	return uint32(v) - 0x0200_0000
 }
 
+// optionalAttrUint reads an optional numeric attribute, 0 when absent or invalid.
+func optionalAttrUint(n *waBinary.Node, key string) uint32 {
+	v, _ := strconv.ParseUint(n.AttrGetter().OptionalString(key), 10, 32)
+	return uint32(v)
+}
+
 func attrUint(n *waBinary.Node, key string) uint32 {
 	v, _ := strconv.ParseUint(n.AttrGetter().String(key), 10, 32)
 	return uint32(v)
@@ -1699,6 +1733,7 @@ func parseRelayData(node *waBinary.Node) *relayData {
 			tokenID:     attrUint(child, "token_id"),
 			authTokenID: attrUint(child, "auth_token_id"),
 			isFNA:       child.AttrGetter().String("is_fna") == "1",
+			c2rRTT:      optionalAttrUint(child, "c2r_rtt"),
 			addresses: []relayAddress{{
 				ipv4: fmt.Sprintf("%d.%d.%d.%d", ab[0], ab[1], ab[2], ab[3]),
 				port: binary.BigEndian.Uint16(ab[4:6]),

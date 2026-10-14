@@ -235,6 +235,26 @@ func ParseSenderReportTiming(data []byte) (senderSsrc, ntpSeconds, ntpFraction u
 	return 0, 0, 0, false
 }
 
+// ParseSenderReportPacketCount returns the sender SSRC and the sender's packet
+// count from the first Sender Report in a compound RTCP packet.
+func ParseSenderReportPacketCount(data []byte) (senderSsrc, packetCount uint32, ok bool) {
+	for offset := 0; offset < len(data); {
+		if offset+4 > len(data) {
+			return 0, 0, false
+		}
+		packetLen := (int(binary.BigEndian.Uint16(data[offset+2:offset+4])) + 1) * 4
+		if packetLen < 4 || offset+packetLen > len(data) {
+			return 0, 0, false
+		}
+		packet := data[offset : offset+packetLen]
+		if packet[1] == RtcpPtSr && len(packet) >= 28 {
+			return binary.BigEndian.Uint32(packet[4:8]), binary.BigEndian.Uint32(packet[20:24]), true
+		}
+		offset += packetLen
+	}
+	return 0, 0, false
+}
+
 // BuildCompactRtcp208 builds the 12-byte compact RTCP (PT 208, RC=1).
 func BuildCompactRtcp208(localSsrc, remoteSsrc uint32, log ...zerolog.Logger) [12]byte {
 	// Source of truth: https://github.com/oxidezap/whatsapp-rust/blob/41095d4e6ba4610e054e9ede3af1d5e88a83faee/wacore/src/voip/rtcp.rs#L49-L58

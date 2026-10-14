@@ -391,6 +391,18 @@ func TestParseSenderReportTiming(t *testing.T) {
 	}
 }
 
+func TestParseSenderReportPacketCount(t *testing.T) {
+	stats := RtcpSenderStats{PacketsSent: 4242, OctetsSent: 99}
+	sr := BuildSenderReport(0x12345678, &stats, 1700000000123)
+	ssrc, count, ok := ParseSenderReportPacketCount(sr[:])
+	if !ok || ssrc != 0x12345678 || count != 4242 {
+		t.Fatalf("packet count = (%#x, %d, %v), want (0x12345678, 4242, true)", ssrc, count, ok)
+	}
+	if _, _, ok := ParseSenderReportPacketCount([]byte{0x81, RtcpPtWaCompact, 0, 2}); ok {
+		t.Fatal("non-SR packet parsed as SR")
+	}
+}
+
 func TestRtcpRequestsVideoKeyframe(t *testing.T) {
 	const localVideo = 0x55556666
 	pli := []byte{0x91, RtcpPtPsfb, 0, 2, 0x11, 0x11, 0x22, 0x22, 0x55, 0x55, 0x66, 0x66}
