@@ -1054,7 +1054,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		n, err := ch.Recv(buf)
+		n, src, err := ch.RecvFrom(buf)
 		if err != nil {
 			return fmt.Errorf("relay recv: %w", err)
 		}
@@ -1135,8 +1135,10 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		case relay.RelayPacketStun:
 			mt, isStun := stun.StunMessageType(pkt)
 			if isStun && mt == stun.MsgBindingRequest {
+				// Reply on the relay that asked; the other relays never sent this
+				// binding-request.
 				resp, answered, err := allocateState.SendBindingSuccess(pkt, func(packet []byte) error {
-					_, sendErr := ch.Send(packet)
+					_, sendErr := ch.SendTo(src, packet)
 					return sendErr
 				})
 				if err != nil {

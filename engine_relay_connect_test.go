@@ -250,3 +250,24 @@ func TestFanoutRecvUnblocksOnCancel(t *testing.T) {
 		t.Fatal("relay channels left open after cancel")
 	}
 }
+
+func TestFanoutRepliesOnTheReceivingRelay(t *testing.T) {
+	a, b, c := newFakeRelayConn("a"), newFakeRelayConn("b"), newFakeRelayConn("c")
+	f := newRelayFanout([]relayConn{a, b, c}, [][]byte{nil, nil, nil}, []string{"a", "b", "c"})
+	defer f.Close()
+	b.in <- []byte("binding-request")
+	buf := make([]byte, 64)
+	n, src, err := f.RecvFrom(buf)
+	if err != nil || string(buf[:n]) != "binding-request" || src != 1 {
+		t.Fatalf("RecvFrom = (%q, %d, %v), want packet from relay 1", buf[:n], src, err)
+	}
+	if _, err := f.SendTo(src, []byte("binding-success")); err != nil {
+		t.Fatalf("SendTo: %v", err)
+	}
+	if a.sentCount() != 0 || b.sentCount() != 1 || c.sentCount() != 0 {
+		t.Fatalf("sends a=%d b=%d c=%d, want only b", a.sentCount(), b.sentCount(), c.sentCount())
+	}
+	if _, err := f.SendTo(7, []byte("x")); err == nil {
+		t.Fatal("SendTo accepted an unknown relay index")
+	}
+}
