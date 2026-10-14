@@ -22,6 +22,17 @@ used by the Elphant fork of GOWA
 | Dither before encoding (`engine_media.go`) | Silence after speech drove the MLow encoder into subnormal floats, about 3x slower per frame; a live call went from about 48% to about 11.5% of a core |
 | Opus mode: `SetCodec("opus")` (`codec_mode.go`, `engine.go`, `engine_media.go`) | Clears capability 31 (`use_mlow_codec_v1`) and sends `voip_settings` turning MLow off in the accept, so both sides use standard Opus (PT120, 16 kHz, 60 ms). Modelled on whatsapp-rust PR #1050. About 4% of a core per call, tested with Android and WhatsApp Web |
 | `opus/`: minimal cgo binding to libopus | Opus encode and decode for the mode above; needs `libopus` and `pkg-config` at build time |
+| Relay fanout (upstream [PR #26](https://github.com/purpshell/meowcaller/pull/26) by pedrobartolini, commit `340c889` only, cherry-picked with its author) | Phones move their uplink to another offered relay after election; binding one relay lost the caller's audio. Binds every offered `te2`, merges receives behind an (SSRC, seq) replay filter, answers latency probes only for offered relays |
+| Media on the offer (upstream [PR #43](https://github.com/purpshell/meowcaller/pull/43) by michsantoz, cherry-picked with its author) | Answering more than about 2 s after the offer lost inbound audio; media now starts while ringing, and an early `mute_v2` and first RTP are applied on Answer. Test imports switched from `hypermeow` to `go.mau.fi/whatsmeow` |
+| Instrumentation (`engine.go`, `engine_media.go`, `engine_relay_log.go`) | Info logs for the offer's relay list (`relay_name`, `is_fna`, `c2r_rtt`; never tokens), relay updates, latency probes echoed or skipped, `mute_v2` toggles, and a 10 s media counter line (peer RTP, peer RTCP, our RTP sent, last peer SR `packet_count`) |
+| `WithOfferFilter` option (`logging.go`, `engine.go`) | Lets GOWA leave an offer (1:1 or group) to another stack: no preaccept, no handler, no state |
+| `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
+
+## Versions
+
+- `v0.1.0-elphant.1`: FFT twiddle cache, dither, Opus mode and the libopus binding.
+- `v0.2.0-elphant.1`: relay fanout (PR #26), media on the offer (PR #43), instrumentation,
+  `WithOfferFilter` and the `!cgo` Opus stub.
 
 ## Syncing with upstream
 
