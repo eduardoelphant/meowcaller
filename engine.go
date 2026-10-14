@@ -703,12 +703,17 @@ func (e *engine) sendAccept(callID string, to, creator types.JID) {
 	m.acceptPending = false
 	e.mu.Unlock()
 
-	accept := signaling.BuildAccept(&signaling.AcceptParams{
+	acceptParams := &signaling.AcceptParams{
 		CallID: callID, To: to, CallCreator: creator,
 		AudioRates: []string{"16000"},
 		Metadata:   waBinary.Attrs{"peer_abtest_bucket_id_list": "125208,94276"},
 		Video:      isVideo,
-	})
+	}
+	if opusMode {
+		acceptParams.Capability = append([]byte(nil), signaling.CapabilityOffer...)
+		acceptParams.VoipSettings = opusVoipSettings
+	}
+	accept := signaling.BuildAccept(acceptParams)
 	accept.Attrs["id"] = e.c.wa.DangerousInternals().GenerateRequestID()
 	if err := e.c.wa.DangerousInternals().SendNode(context.Background(), accept); err != nil {
 		e.c.log.Error().Err(err).Str("call_id", callID).Msg("send accept failed")

@@ -258,7 +258,15 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		"participant_id": selfParticipantID,
 	})
 
-	enc := mlow.NewMlowEncoder(mlow.WithLogger(log))
+	var enc audioEncoder = mlow.NewMlowEncoder(mlow.WithLogger(log))
+	if opusMode {
+		oe, err := newOpusEncoder()
+		if err != nil {
+			return err
+		}
+		enc = oe
+		log.Info().Msg("audio codec: opus")
+	}
 	e.mu.Lock()
 	m := e.calls[callID]
 	audioReceivers := (*participantReceiveRegistry)(nil)
@@ -275,6 +283,11 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			selfLID,
 			peerLID,
 			func() participantAudioDecoder {
+				if opusMode {
+					if od, err := newOpusDecoder(); err == nil {
+						return od
+					}
+				}
 				return mlow.NewMlowDecoder(mlow.WithLogger(log))
 			},
 			WithLogger(log),
