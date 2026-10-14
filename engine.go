@@ -1176,6 +1176,19 @@ func (e *engine) onCallRaw(callNode *waBinary.Node) bool {
 		return false
 	}
 	switch kids[0].Tag {
+	case "group_update", "enc_rekey", "waiting_room_update", "user_action", "screen_share", "video":
+		// Typed acks and side effects are only for calls this engine holds. A
+		// call it never took (filtered by WithOfferFilter, ended, or someone
+		// else's) gets whatsmeow's plain ack and nothing else: a typed video ack
+		// would accept a video upgrade, and enc_rekey would run a Signal decrypt.
+		callID := kids[0].AttrGetter().OptionalString("call-id")
+		if callID == "" || e.lookup(callID) == nil {
+			e.c.log.Debug().Str("action", kids[0].Tag).Str("call_id", callID).
+				Msg("call control for an unknown call; leaving it to whatsmeow")
+			return false
+		}
+	}
+	switch kids[0].Tag {
 	case "group_update", "enc_rekey", "waiting_room_update", "user_action", "screen_share":
 		// Source of truth: https://github.com/purpshell/meowcaller/blob/36d54857c74e45ccb08f6444a32d2afa13f20be9/datasheets/group-video-reactions.md#L31-L56
 		ack, ok := signaling.BuildCallControlAck(callNode, kids[0].Tag)
@@ -1261,7 +1274,7 @@ func (e *engine) ackVideoStanza(callNode *waBinary.Node) {
 		e.c.log.Warn().Msg("video ack: missing id/from, not acking")
 		return
 	}
-	if err := e.c.wa.DangerousInternals().SendNode(context.Background(), ack); err != nil {
+	if err := e.transmitCallNode(context.Background(), ack); err != nil {
 		e.c.log.Warn().Err(err).Str("id", ack.AttrGetter().String("id")).Msg("send video ack failed")
 		return
 	}

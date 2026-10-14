@@ -235,6 +235,14 @@ func (e *engine) ingestGroupEpoch(ctx context.Context, envelope *signaling.CallC
 	if err != nil {
 		return err
 	}
+	// Check the call before decrypting: a decrypt can consume a prekey, and a
+	// rekey for a call we do not hold is rejected anyway.
+	e.mu.Lock()
+	known := e.calls[rekey.CallID] != nil && e.calls[rekey.CallID].group
+	e.mu.Unlock()
+	if !known {
+		return fmt.Errorf("meowcaller: group rekey for unknown call %s", rekey.CallID)
+	}
 	enc, ok := envelope.Action.GetOptionalChildByTag("enc")
 	if !ok {
 		return errors.New("meowcaller: group rekey has no encrypted payload")

@@ -28,6 +28,7 @@ used by the Elphant fork of GOWA
 | Fixes on top of PR #26 and #43 (`engine_media.go`, `engine_relay_fanout.go`, `engine.go`) | Abandoned or cancelled relay connects close their channel; relays connect in parallel; the fanout closes as soon as the call ends; latency probes are echoed only for relays the fanout bound; media that ends while ringing can be restarted by Answer; binding-success goes back on the relay that asked |
 | Instrumentation (`engine.go`, `engine_media.go`, `engine_relay_log.go`) | Info logs for the offer's relay list (`relay_name`, `is_fna`, `c2r_rtt`; never tokens), relay updates, latency probes echoed or skipped, `mute_v2` toggles, and a 10 s media counter line (peer RTP raw and after the replay filter, peer RTCP, our RTP sent, last peer SR `packet_count`) |
 | `WithOfferFilter` option (`logging.go`, `engine.go`) | Lets GOWA leave an offer (1:1 or group) to another stack: no preaccept, no handler, no state |
+| Raw call controls only for known calls (`engine.go`, `engine_group_control.go`) | `group_update`, `enc_rekey`, `waiting_room_update`, `user_action`, `screen_share` and `video` for a call-id the engine does not hold (filtered by `WithOfferFilter`, ended, or not ours) get whatsmeow's plain ack and nothing else; group rekeys check the call before the Signal decrypt |
 | `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
 
 ## Versions
