@@ -85,6 +85,12 @@ type engineCall struct {
 	earlyMuteCreator types.JID
 	inboundSeen      bool
 	answered         bool
+
+	// mediaRelays names the relays the 1:1 media fanout binds: the planned set
+	// when media starts, narrowed to the connected ones once the fanout is up.
+	// nil until media starts. Latency probes are echoed only for these, since
+	// later relay blocks can name relays the fanout never bound.
+	mediaRelays map[string]bool
 }
 
 // newEngine creates the engine for a Client.
@@ -869,7 +875,11 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 	// relay we were never connected to.
 	e.mu.Lock()
 	offered := map[string]bool{}
-	if m.relay != nil {
+	if m.mediaRelays != nil {
+		for name := range m.mediaRelays {
+			offered[name] = true
+		}
+	} else if m.relay != nil {
 		for i := range m.relay.endpoints {
 			if name := m.relay.endpoints[i].relayName; name != "" {
 				offered[name] = true
@@ -903,8 +913,13 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 	}
 	e.c.log.Info().Str("call_id", ev.CallID).
 		Strs("echoed", echoed).
-		Strs("skipped_outside_offer", skipped).
+		Int("skipped", len(skipped)).
 		Msg("relaylatency probes received")
+	if len(skipped) > 0 {
+		e.c.log.Debug().Str("call_id", ev.CallID).
+			Strs("relay_names", skipped).
+			Msg("skipped latency responses for relays media is not bound to")
+	}
 	for _, p := range probes {
 		resp := signaling.BuildRelayLatency(&signaling.RelayLatencyParams{
 			CallID:       ev.CallID,
@@ -915,7 +930,7 @@ func (e *engine) onRelayLatency(ev *events.CallRelayLatency) {
 			AddressBytes: p.addr,
 		})
 		resp.Attrs["id"] = e.c.wa.GenerateMessageID()
-		if err := e.c.wa.DangerousInternals().SendNode(context.Background(), resp); err != nil {
+		if err := e.transmitCallNode(context.Background(), resp); err != nil {
 			e.c.log.Error().Err(err).Str("call_id", ev.CallID).Msg("send relaylatency failed")
 			return
 		}

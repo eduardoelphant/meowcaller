@@ -82,6 +82,12 @@ func (e *engine) maybeStartMedia(callID string) {
 		return
 	}
 	m.started = true
+	if !m.group {
+		m.mediaRelays = map[string]bool{}
+		for _, t := range fanoutTargets(rd, m.direction == CallDirectionIncoming, true) {
+			m.mediaRelays[t.relayName] = true
+		}
+	}
 	mctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	call := m.call
@@ -118,25 +124,9 @@ func (e *engine) maybeStartMedia(callID string) {
 //
 // NOT VALIDATED: live-relay only.
 func (e *engine) connectAndAllocateAll(ctx context.Context, rd *relayData, streamSsrcs [9]uint32, inbound bool, multi bool) (*relayFanout, error) {
-	primary := getMediaRelayEndpoint(rd, inbound)
-	if primary == nil || len(primary.addresses) == 0 {
+	targets := fanoutTargets(rd, inbound, multi)
+	if len(targets) == 0 {
 		return nil, fmt.Errorf("relay has no usable endpoint")
-	}
-	targets := []*relayEndpoint{primary}
-	if multi {
-		seen := map[string]bool{fmt.Sprintf("%s:%d", primary.addresses[0].ipv4, primary.addresses[0].port): true}
-		for i := range rd.endpoints {
-			ep := &rd.endpoints[i]
-			if len(ep.addresses) == 0 {
-				continue
-			}
-			key := fmt.Sprintf("%s:%d", ep.addresses[0].ipv4, ep.addresses[0].port)
-			if seen[key] {
-				continue
-			}
-			seen[key] = true
-			targets = append(targets, ep)
-		}
 	}
 
 	// Connect every target in parallel: one slow or dead relay must not hold the
@@ -189,6 +179,35 @@ func (e *engine) connectAndAllocateAll(ctx context.Context, rd *relayData, strea
 	}
 	e.c.log.Info().Int("connected", len(chans)).Int("offered", len(targets)).Strs("relays", names).Msg("relay fanout established")
 	return newRelayFanout(chans, allocs, names), nil
+}
+
+// fanoutTargets lists the relays the media fanout binds: the preferred endpoint
+// first, then (multi) every other offered endpoint with a distinct address.
+func fanoutTargets(rd *relayData, inbound bool, multi bool) []*relayEndpoint {
+	if rd == nil {
+		return nil
+	}
+	primary := getMediaRelayEndpoint(rd, inbound)
+	if primary == nil || len(primary.addresses) == 0 {
+		return nil
+	}
+	targets := []*relayEndpoint{primary}
+	if multi {
+		seen := map[string]bool{fmt.Sprintf("%s:%d", primary.addresses[0].ipv4, primary.addresses[0].port): true}
+		for i := range rd.endpoints {
+			ep := &rd.endpoints[i]
+			if len(ep.addresses) == 0 {
+				continue
+			}
+			key := fmt.Sprintf("%s:%d", ep.addresses[0].ipv4, ep.addresses[0].port)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			targets = append(targets, ep)
+		}
+	}
+	return targets
 }
 
 // connectOneRelay opens the relay DataChannel and sends the STUN allocate for a
@@ -359,6 +378,17 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// The receive loop below only wakes on a packet or on the fanout closing, so
 	// close it as soon as the call ends instead of waiting for the next packet.
 	defer closeFanoutOnCancel(ctx, ch)()
+	if !isGroup {
+		bound := make(map[string]bool, len(ch.names))
+		for _, name := range ch.names {
+			bound[name] = true
+		}
+		e.mu.Lock()
+		if mm := e.calls[callID]; mm != nil && ctx.Err() == nil {
+			mm.mediaRelays = bound
+		}
+		e.mu.Unlock()
+	}
 	allocateState := newGroupRelayAllocateStateWithHBHFEC(
 		ch.allocs[0],
 		rd.relayKeyASCII,
