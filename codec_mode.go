@@ -1,6 +1,7 @@
 package meowcaller
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/purpshell/meowcaller/opus"
@@ -15,25 +16,41 @@ var opusMode bool
 
 var opusVoipSettings = []byte(`{"encode":{"use_mlow_codec_v1":"false"},"options":{"enable_48khz_rtp_clock":"false"}}`)
 
+// ErrOpusUnavailable is returned by SetCodec("opus") in builds without cgo (no
+// libopus). The process is then left in MLow mode, so signaling and media agree.
+var ErrOpusUnavailable = errors.New("meowcaller: opus codec unavailable (built without cgo); using mlow")
+
 // SetCodec selects "opus" or "mlow" for every client in the process. Call it once,
-// before NewClient.
+// before NewClient. Opus needs a cgo build linked to libopus; without it
+// SetCodec("opus") selects MLow and returns ErrOpusUnavailable.
 func SetCodec(name string) error {
+	var err error
 	switch name {
 	case "opus":
-		opusMode = true
+		if opus.Available {
+			opusMode = true
+		} else {
+			opusMode = false
+			err = ErrOpusUnavailable
+		}
 	case "mlow":
 		opusMode = false
 	default:
 		return fmt.Errorf("meowcaller: unknown codec %q", name)
 	}
+	setMlowCapability(!opusMode)
+	return err
+}
+
+// setMlowCapability sets or clears capability 31 (use_mlow_codec_v1).
+func setMlowCapability(mlow bool) {
 	for _, blob := range [][]byte{signaling.CapabilityOffer, signaling.CapabilityVideoOffer, signaling.CapabilityPreaccept} {
-		if opusMode {
-			blob[5] &^= 0x80
-		} else {
+		if mlow {
 			blob[5] |= 0x80
+		} else {
+			blob[5] &^= 0x80
 		}
 	}
-	return nil
 }
 
 type audioEncoder interface {

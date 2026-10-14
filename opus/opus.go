@@ -1,3 +1,5 @@
+//go:build cgo
+
 // Package opus is a minimal cgo binding to libopus for WhatsApp calls: mono float
 // encode and decode at one sample rate. Elphant fork addition, not part of meowcaller.
 package opus
@@ -18,6 +20,9 @@ import (
 )
 
 const maxPacketBytes = 1275
+
+// Available reports whether this build links libopus (cgo builds only).
+const Available = true
 
 // Encoder encodes mono float32 frames.
 type Encoder struct {

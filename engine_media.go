@@ -321,12 +321,14 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 
 	var enc audioEncoder = mlow.NewMlowEncoder(mlow.WithLogger(log))
 	if opusMode {
-		oe, err := newOpusEncoder()
-		if err != nil {
-			return err
+		// SetCodec already keeps a build without libopus in MLow mode; this
+		// fallback only guards a failing encoder create so the call still has audio.
+		if oe, err := newOpusEncoder(); err != nil {
+			log.Warn().Err(err).Msg("opus encoder unavailable; falling back to MLow")
+		} else {
+			enc = oe
+			log.Info().Msg("audio codec: opus")
 		}
-		enc = oe
-		log.Info().Msg("audio codec: opus")
 	}
 	e.mu.Lock()
 	m := e.calls[callID]
@@ -345,9 +347,11 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			peerLID,
 			func() participantAudioDecoder {
 				if opusMode {
-					if od, err := newOpusDecoder(); err == nil {
+					od, err := newOpusDecoder()
+					if err == nil {
 						return od
 					}
+					log.Warn().Err(err).Msg("opus decoder unavailable; falling back to MLow")
 				}
 				return mlow.NewMlowDecoder(mlow.WithLogger(log))
 			},
