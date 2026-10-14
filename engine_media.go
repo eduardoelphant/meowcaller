@@ -1026,8 +1026,10 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	}()
 
 	// Periodic media counters (every 10 s while media runs) so a one-way-audio call
-	// is visible in Info logs without per-packet lines.
-	var statPeerRTP, statPeerRTPDecoded, statPeerRTCP, statPeerSRPackets atomic.Uint64
+	// is visible in Info logs without per-packet lines. peer_rtp_raw counts every
+	// RTP packet from any relay; peer_rtp counts unique ones after the replay
+	// filter (each packet can arrive once per bound relay).
+	var statPeerRTPRaw, statPeerRTP, statPeerRTPDecoded, statPeerRTCP, statPeerSRPackets atomic.Uint64
 	go func() {
 		t := time.NewTicker(mediaStatsInterval)
 		defer t.Stop()
@@ -1038,6 +1040,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			case <-t.C:
 			}
 			log.Info().
+				Uint64("peer_rtp_raw", statPeerRTPRaw.Load()).
 				Uint64("peer_rtp", statPeerRTP.Load()).
 				Uint64("peer_rtp_decoded", statPeerRTPDecoded.Load()).
 				Uint64("peer_rtcp", statPeerRTCP.Load()).
@@ -1157,7 +1160,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if rtpSeen++; rtpSeen == 1 {
 			log.Info().Int("bytes", n).Msg("first RTP-classified packet from relay, relay is bridging the peer's media")
 		}
-		statPeerRTP.Store(rtpSeen)
+		statPeerRTPRaw.Store(rtpSeen)
 		vh, vok := rtp.ParseRtpHeader(pkt)
 		if vok {
 			if rtpInspect < 20 || vh.PayloadType == rtp.RtpPayloadTypeH264 || vh.PayloadType == rtp.RtpPayloadTypeAppData {
@@ -1181,6 +1184,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		if rtpDedup.Duplicate(vh.Ssrc, vh.SequenceNumber) {
 			continue
 		}
+		statPeerRTP.Add(1)
 		kind := classifyMediaPayload(vh)
 		if kind == mediaPayloadAppData {
 			media, ok := audioReceivers.UnprotectAppData(pkt)
