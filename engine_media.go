@@ -139,20 +139,50 @@ func (e *engine) connectAndAllocateAll(ctx context.Context, rd *relayData, strea
 		}
 	}
 
-	var chans []*relay.RelayMediaChannel
-	var allocs [][]byte
-	var names []string
-	for _, ep := range targets {
-		ch, allocate, err := e.connectOneRelay(ctx, rd, ep, streamSsrcs)
-		if err != nil {
-			// Secondary relays failing is survivable; the primary failing with
-			// no fallback is not.
-			e.c.log.Warn().Err(err).Str("relay_name", ep.relayName).Msg("relay connect failed; continuing without it")
+	// Connect every target in parallel: one slow or dead relay must not hold the
+	// others up for its whole connect timeout.
+	type connected struct {
+		ch       relayConn
+		allocate []byte
+		err      error
+	}
+	results := make([]connected, len(targets))
+	var wg sync.WaitGroup
+	for i, ep := range targets {
+		if ctx.Err() != nil {
+			results[i].err = ctx.Err()
 			continue
 		}
-		chans = append(chans, ch)
-		allocs = append(allocs, allocate)
-		names = append(names, ep.relayName)
+		wg.Add(1)
+		go func(i int, ep *relayEndpoint) {
+			defer wg.Done()
+			ch, allocate, err := e.connectOneRelay(ctx, rd, ep, streamSsrcs)
+			results[i] = connected{ch: ch, allocate: allocate, err: err}
+		}(i, ep)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		for _, r := range results {
+			if r.ch != nil {
+				_ = r.ch.Close()
+			}
+		}
+		return nil, err
+	}
+
+	var chans []relayConn
+	var allocs [][]byte
+	var names []string
+	for i, r := range results {
+		if r.err != nil {
+			// Secondary relays failing is survivable; the primary failing with
+			// no fallback is not.
+			e.c.log.Warn().Err(r.err).Str("relay_name", targets[i].relayName).Msg("relay connect failed; continuing without it")
+			continue
+		}
+		chans = append(chans, r.ch)
+		allocs = append(allocs, r.allocate)
+		names = append(names, targets[i].relayName)
 	}
 	if len(chans) == 0 {
 		return nil, fmt.Errorf("no relay reachable (%d offered)", len(targets))
@@ -166,7 +196,7 @@ func (e *engine) connectAndAllocateAll(ctx context.Context, rd *relayData, strea
 // keepalive).
 //
 // NOT VALIDATED: live-relay only.
-func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEndpoint, streamSsrcs [9]uint32) (*relay.RelayMediaChannel, []byte, error) {
+func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEndpoint, streamSsrcs [9]uint32) (relayConn, []byte, error) {
 	log := e.c.log
 	if ep == nil || len(ep.addresses) == 0 {
 		return nil, nil, fmt.Errorf("relay has no usable endpoint")
@@ -178,26 +208,30 @@ func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEn
 		"ipv4": ep.addresses[0].ipv4, "port": ep.addresses[0].port, "token_id": ep.tokenID,
 	})
 
-	type result struct {
-		ch  *relay.RelayMediaChannel
-		err error
-	}
-	done := make(chan result, 1)
+	done := make(chan relayDialResult, 1)
 	go func() {
-		ch, err := relay.ConnectRelayMedia(addr, relay.WithLogger(log))
-		done <- result{ch, err}
+		ch, err := e.dialRelayConn(addr)
+		done <- relayDialResult{ch, err}
 	}()
-	var ch *relay.RelayMediaChannel
+	timer := time.NewTimer(relayConnectTimeout)
+	defer timer.Stop()
+	var ch relayConn
 	select {
 	case r := <-done:
 		if r.err != nil {
 			return nil, nil, fmt.Errorf("relay connect: %w", r.err)
 		}
 		ch = r.ch
-	case <-time.After(12 * time.Second):
+	case <-timer.C:
+		closeLateRelayConn(done)
 		return nil, nil, fmt.Errorf("relay connect timed out (DTLS didn't complete)")
 	case <-ctx.Done():
+		closeLateRelayConn(done)
 		return nil, nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		_ = ch.Close()
+		return nil, nil, err
 	}
 	log.Info().Str("relay_name", ep.relayName).Msg("relay DataChannel open")
 
@@ -233,6 +267,37 @@ func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEn
 		"stream_ssrcs": streamSsrcs,
 	})
 	return ch, allocate, nil
+}
+
+// relayConnectTimeout bounds one relay's DTLS/SCTP connect.
+var relayConnectTimeout = 12 * time.Second
+
+type relayDialResult struct {
+	ch  relayConn
+	err error
+}
+
+// dialRelayConn opens one relay media DataChannel (tests replace dialRelay).
+func (e *engine) dialRelayConn(addr *net.UDPAddr) (relayConn, error) {
+	if e.dialRelay != nil {
+		return e.dialRelay(addr)
+	}
+	ch, err := relay.ConnectRelayMedia(addr, relay.WithLogger(e.c.log))
+	if err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
+// closeLateRelayConn waits, in the background, for a connect that was given up
+// on (timeout or cancel) and closes its channel if one still arrives, so its
+// UDP socket and DTLS/SCTP goroutines are not leaked.
+func closeLateRelayConn(done <-chan relayDialResult) {
+	go func() {
+		if r := <-done; r.ch != nil {
+			_ = r.ch.Close()
+		}
+	}()
 }
 
 // runMedia runs the per-frame media loop over the relay DataChannel: the Player's frames

@@ -3,9 +3,21 @@ package meowcaller
 import (
 	"errors"
 	"sync"
-
-	"github.com/purpshell/meowcaller/relay"
 )
+
+// relayConn is one relay media DataChannel (*relay.RelayMediaChannel in
+// production; tests use fakes).
+type relayConn interface {
+	Send(data []byte) (int, error)
+	Recv(buf []byte) (int, error)
+	Close() error
+}
+
+// fanoutPacket is one inbound packet and the index of the relay it came from.
+type fanoutPacket struct {
+	data []byte
+	src  int
+}
 
 // relayFanout runs one logical media channel across every usable relay in the
 // offer, mirroring the reference implementation's bind-to-all model: outbound
@@ -19,11 +31,11 @@ import (
 // outcome irrelevant. WhatsApp Web callers never migrate, which is why
 // single-relay binding appeared to work when tested from web.
 type relayFanout struct {
-	chans  []*relay.RelayMediaChannel
+	chans  []relayConn
 	allocs [][]byte
 	names  []string
 
-	packets   chan []byte
+	packets   chan fanoutPacket
 	done      chan struct{}
 	closeOnce sync.Once
 
@@ -41,23 +53,23 @@ var errFanoutClosed = errors.New("meowcaller: relay fanout closed")
 
 // newRelayFanout takes ownership of the channels and their matching per-relay
 // allocate payloads, and starts one reader per channel.
-func newRelayFanout(chans []*relay.RelayMediaChannel, allocs [][]byte, names []string) *relayFanout {
+func newRelayFanout(chans []relayConn, allocs [][]byte, names []string) *relayFanout {
 	// Source of truth: https://github.com/JotaDev66/WaCalls/blob/edeb31f0427aba896639db503153b777a405eccf/internal/voip/transport/sctprelay.go#L105-L127
 	f := &relayFanout{
 		chans:   chans,
 		allocs:  allocs,
 		names:   names,
-		packets: make(chan []byte, fanoutBacklog),
+		packets: make(chan fanoutPacket, fanoutBacklog),
 		done:    make(chan struct{}),
 		live:    len(chans),
 	}
-	for _, ch := range chans {
-		go f.readLoop(ch)
+	for i, ch := range chans {
+		go f.readLoop(i, ch)
 	}
 	return f
 }
 
-func (f *relayFanout) readLoop(ch *relay.RelayMediaChannel) {
+func (f *relayFanout) readLoop(src int, ch relayConn) {
 	buf := make([]byte, 2048)
 	for {
 		n, err := ch.Recv(buf)
@@ -68,7 +80,7 @@ func (f *relayFanout) readLoop(ch *relay.RelayMediaChannel) {
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 		select {
-		case f.packets <- pkt:
+		case f.packets <- fanoutPacket{data: pkt, src: src}:
 		case <-f.done:
 			return
 		default:
@@ -124,20 +136,37 @@ func (f *relayFanout) Send(data []byte) (int, error) {
 // Recv pops the next packet from any relay into buf, blocking like the
 // single-channel Recv it replaces.
 func (f *relayFanout) Recv(buf []byte) (int, error) {
+	n, _, err := f.RecvFrom(buf)
+	return n, err
+}
+
+// RecvFrom is Recv that also reports the index of the relay the packet came
+// from, for replies that belong on that relay only (STUN binding-success).
+func (f *relayFanout) RecvFrom(buf []byte) (int, int, error) {
 	select {
 	case pkt := <-f.packets:
-		n := copy(buf, pkt)
-		return n, nil
+		return copy(buf, pkt.data), pkt.src, nil
 	case <-f.done:
 		// Drain anything already merged before reporting closure.
 		select {
 		case pkt := <-f.packets:
-			n := copy(buf, pkt)
-			return n, nil
+			return copy(buf, pkt.data), pkt.src, nil
 		default:
-			return 0, errFanoutClosed
+			return 0, -1, errFanoutClosed
 		}
 	}
+}
+
+// SendTo writes to one relay, by the index RecvFrom reported.
+func (f *relayFanout) SendTo(src int, data []byte) (int, error) {
+	f.mu.Lock()
+	if f.closed || src < 0 || src >= len(f.chans) {
+		f.mu.Unlock()
+		return 0, errFanoutClosed
+	}
+	ch := f.chans[src]
+	f.mu.Unlock()
+	return ch.Send(data)
 }
 
 // ResendAllocates re-sends each relay its own allocate payload. Allocates embed

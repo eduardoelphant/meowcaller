@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"reflect"
 	"strconv"
 	"strings"
@@ -37,6 +38,7 @@ type engine struct {
 	sendCallNode    func(context.Context, waBinary.Node) error
 	requestCallNode func(context.Context, waBinary.Node, string) (*waBinary.Node, error)
 	decryptCallKey  func(context.Context, *events.CallOffer) ([]byte, error)
+	dialRelay       func(*net.UDPAddr) (relayConn, error) // nil: relay.ConnectRelayMedia
 	rawCallHookErr  error
 }
 
