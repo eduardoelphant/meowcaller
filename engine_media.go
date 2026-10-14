@@ -269,6 +269,11 @@ func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEn
 	return ch, allocate, nil
 }
 
+// closeFanoutOnCancel closes f when ctx is done; call the returned func to stop.
+func closeFanoutOnCancel(ctx context.Context, f *relayFanout) func() bool {
+	return context.AfterFunc(ctx, func() { _ = f.Close() })
+}
+
 // relayConnectTimeout bounds one relay's DTLS/SCTP connect.
 var relayConnectTimeout = 12 * time.Second
 
@@ -351,6 +356,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		return err
 	}
 	defer ch.Close()
+	// The receive loop below only wakes on a packet or on the fanout closing, so
+	// close it as soon as the call ends instead of waiting for the next packet.
+	defer closeFanoutOnCancel(ctx, ch)()
 	allocateState := newGroupRelayAllocateStateWithHBHFEC(
 		ch.allocs[0],
 		rd.relayKeyASCII,

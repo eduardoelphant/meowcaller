@@ -225,3 +225,28 @@ func TestConnectAndAllocateAllConnectsInParallel(t *testing.T) {
 		}
 	}
 }
+
+func TestFanoutRecvUnblocksOnCancel(t *testing.T) {
+	a, b := newFakeRelayConn("a"), newFakeRelayConn("b")
+	f := newRelayFanout([]relayConn{a, b}, [][]byte{nil, nil}, []string{"a", "b"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer closeFanoutOnCancel(ctx, f)()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := f.Recv(make([]byte, 64))
+		errc <- err
+	}()
+	time.Sleep(10 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("Recv returned a packet after cancel, want an error")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Recv still blocked 1 s after cancel")
+	}
+	if !a.closed.Load() || !b.closed.Load() {
+		t.Fatal("relay channels left open after cancel")
+	}
+}
