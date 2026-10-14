@@ -114,3 +114,21 @@ func TestNoOfferFilterKeepsBehaviour(t *testing.T) {
 		t.Fatalf("without a filter: preaccept=%v handled=%d", hasTag(*sent, "preaccept"), len(*handled))
 	}
 }
+
+func TestStaleReplayedOfferIsIgnored(t *testing.T) {
+	eng, sent, handled := testEngineForOffers(t, nil)
+	ev := directOffer()
+	ev.Data.Attrs["e"] = "120"
+	eng.onOffer(ev)
+	if len(*sent) != 0 || len(*handled) != 0 || len(eng.calls) != 0 {
+		t.Fatalf("stale offer engaged: sent=%d handled=%d calls=%d", len(*sent), len(*handled), len(eng.calls))
+	}
+
+	eng, sent, handled = testEngineForOffers(t, nil)
+	ev = directOffer()
+	ev.Data.Attrs["e"] = "3"
+	eng.onOffer(ev)
+	if !hasTag(*sent, "preaccept") || len(*handled) != 1 {
+		t.Fatal("fresh offer with e=3 was not handled")
+	}
+}
