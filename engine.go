@@ -526,6 +526,16 @@ func (e *engine) placeCall(ctx context.Context, target string, opts CallOptions)
 // preparation step, independent of the later Answer/Reject), and fires the
 // OnIncomingCall listener. Only the <accept> is deferred to Answer.
 func (e *engine) onOffer(ev *events.CallOffer) {
+	// Where WhatsApp puts the elapsed-seconds `e` attribute used by the stale
+	// offer gate is unverified with whatsmeow (ev.Data is the <offer> child, not
+	// the <call> wrapper); log it raw so a live call shows it.
+	offerE := "absent"
+	if ev.Data != nil {
+		if raw, ok := ev.Data.Attrs["e"]; ok {
+			offerE = fmt.Sprint(raw)
+		}
+	}
+	e.c.log.Debug().Str("call_id", ev.CallID).Str("e", offerE).Msg("offer e attribute")
 	if fn := e.c.offerFilter; fn != nil && !fn(ev) {
 		e.c.log.Debug().Str("call_id", ev.CallID).Msg("offer rejected by offer filter; ignoring")
 		return
