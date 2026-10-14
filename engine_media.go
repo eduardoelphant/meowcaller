@@ -110,7 +110,31 @@ func (e *engine) maybeStartMedia(callID string) {
 		if err := e.runMedia(mctx, callID, call, callKey, selfLID, peerLID, rd, inbound); err != nil {
 			e.c.log.Warn().Err(err).Str("call_id", callID).Msg("media ended")
 		}
+		e.allowMediaRestart(mctx, cancel, callID, m)
 	}()
+}
+
+// allowMediaRestart runs after runMedia returns on its own (ctx not cancelled).
+// Media now starts on the offer, so it can fail while the call is still ringing
+// (no reachable relay, a relay error); clearing started lets Answer or a later
+// relay update start it again. Answered and group calls are left as they are.
+func (e *engine) allowMediaRestart(mctx context.Context, cancel context.CancelFunc, callID string, m *engineCall) {
+	if mctx.Err() != nil {
+		return
+	}
+	e.mu.Lock()
+	reset := e.calls[callID] == m && m.started && !m.group &&
+		m.direction == CallDirectionIncoming && !m.answered
+	if reset {
+		m.started = false
+		m.cancel = nil
+		m.mediaRelays = nil
+	}
+	e.mu.Unlock()
+	cancel()
+	if reset {
+		e.c.log.Info().Str("call_id", callID).Msg("media ended while ringing; Answer will restart it")
+	}
 }
 
 // connectAndAllocateAll opens a relay DataChannel and sends the STUN allocate

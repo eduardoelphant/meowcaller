@@ -6,6 +6,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 	"go.mau.fi/whatsmeow"
@@ -125,4 +126,43 @@ func TestMediaRelaysNarrowToConnectedRelays(t *testing.T) {
 	if got := echoedRelayNames(sent()); len(got) != 1 || got[0] != "a" {
 		t.Fatalf("echoed %v, want [a]", got)
 	}
+}
+
+func TestMediaExitWhileRingingAllowsRestart(t *testing.T) {
+	eng, call, _ := testRingingInbound(t, testRelayData("a"))
+	var dials int
+	var mu sync.Mutex
+	eng.dialRelay = func(*net.UDPAddr) (relayConn, error) {
+		mu.Lock()
+		dials++
+		mu.Unlock()
+		return nil, errors.New("unreachable")
+	}
+	t.Cleanup(func() { eng.finishCall("CID", "test") })
+	notStarted := func() bool {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		m := eng.calls["CID"]
+		return m != nil && !m.started && m.cancel == nil
+	}
+
+	eng.maybeStartMedia("CID")
+	waitFor(t, "started reset after media failed while ringing", notStarted)
+
+	if err := eng.answer(call); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	waitFor(t, "Answer to start media again", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return dials == 2
+	})
+	// Answered now: a second failure keeps started set.
+	time.Sleep(50 * time.Millisecond)
+	waitFor(t, "second media run to end", func() bool {
+		eng.mu.Lock()
+		defer eng.mu.Unlock()
+		m := eng.calls["CID"]
+		return m != nil && m.started && m.answered
+	})
 }
