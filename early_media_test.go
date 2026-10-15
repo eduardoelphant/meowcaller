@@ -1,6 +1,7 @@
 package meowcaller
 
 import (
+	"context"
 	"net"
 	"sync"
 	"testing"
@@ -91,13 +92,84 @@ func TestEarlyMediaListenSendsNoRTPOrSRTCPBeforeAnswer(t *testing.T) {
 		_, rtcp, rtpN, _ := packetKinds(conn())
 		return rtcp > 0 && rtpN > 0
 	})
+	// The first sender report follows our first RTP.
+	c := conn()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, p := range c.sent {
+		switch relay.ClassifyRelayPacket(p) {
+		case relay.RelayPacketRtcp:
+			t.Fatal("first SRTCP went out before the first RTP")
+		case relay.RelayPacketRtp:
+			return
+		}
+	}
+}
+
+func TestEarlyMediaListenCallEndedWhileRingingClosesRelay(t *testing.T) {
+	eng, _, conn, _ := ringingWithFakeRelay(t, EarlyMediaListen)
+
+	eng.maybeStartMedia("CID")
+	waitFor(t, "relay connected", func() bool { return conn() != nil })
+	eng.finishCall("CID", "caller hung up")
+	waitFor(t, "relay channel closed after the call ended", func() bool { return conn().closed.Load() })
+	if _, rtcp, rtpN, _ := packetKinds(conn()); rtcp != 0 || rtpN != 0 {
+		t.Fatalf("ended ringing call sent %d RTCP and %d RTP packets", rtcp, rtpN)
+	}
+}
+
+func TestAnswerDuringMediaExitRestartsMedia(t *testing.T) {
+	// The interleaving: a run started while ringing is ending on its own; Answer
+	// lands first, sees started=true and does not start media; the run's exit
+	// then restarts media under the engine lock.
+	eng, call, _, dials := ringingWithFakeRelay(t, EarlyMediaListen)
+	m := eng.calls["CID"]
+	mctx, cancel := context.WithCancel(context.Background())
+	eng.mu.Lock()
+	m.started = true
+	m.cancel = cancel
+	eng.mu.Unlock()
+
+	if err := eng.answer(call); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	if n := dials(); n != 0 {
+		t.Fatalf("Answer dialed %d relays while the old run held started", n)
+	}
+	eng.allowMediaRestart(mctx, cancel, "CID", m, true)
+	waitFor(t, "media restarted for the answered call", func() bool { return dials() == 1 })
+}
+
+func TestMediaExitAfterAnswerAtStartDoesNotRestart(t *testing.T) {
+	eng, _, _, dials := ringingWithFakeRelay(t, EarlyMediaOff)
+	m := eng.calls["CID"]
+	mctx, cancel := context.WithCancel(context.Background())
+	eng.mu.Lock()
+	m.started = true
+	m.answered = true
+	eng.mu.Unlock()
+	eng.allowMediaRestart(mctx, cancel, "CID", m, false)
+	time.Sleep(50 * time.Millisecond)
+	eng.mu.Lock()
+	started := m.started
+	eng.mu.Unlock()
+	if dials() != 0 || !started {
+		t.Fatalf("run started after Answer was restarted or reset: dials=%d started=%v", dials(), started)
+	}
 }
 
 func TestEarlyMediaOffStartsMediaOnAnswer(t *testing.T) {
 	eng, call, _, dials := ringingWithFakeRelay(t, EarlyMediaOff)
 
 	eng.maybeStartMedia("CID")
+	before := eng.calls["CID"].relay
 	eng.onRelay("CID", &testRelayNode)
+	eng.mu.Lock()
+	after := eng.calls["CID"].relay
+	eng.mu.Unlock()
+	if after == before || len(after.endpoints) != 1 || after.endpoints[0].relayName != "a" {
+		t.Fatalf("onRelay did not replace m.relay (before %p, after %p)", before, after)
+	}
 	time.Sleep(100 * time.Millisecond)
 	if n := dials(); n != 0 {
 		t.Fatalf("dialed %d relays while ringing in off mode, want 0", n)

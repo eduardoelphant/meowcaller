@@ -89,11 +89,12 @@ func (e *engine) maybeStartMedia(callID string) {
 		return
 	}
 	m.started = true
-	m.sendGate = nil
+	var gate *mediaSendGate
 	if ringing && e.c.earlyMedia == EarlyMediaListen {
-		m.sendGate = newClosedMediaSendGate()
+		gate = newClosedMediaSendGate()
 		e.c.log.Info().Str("call_id", callID).Msg("early media listen: ringing")
 	}
+	m.sendGate = gate
 	if !m.group {
 		m.mediaRelays = map[string]bool{}
 		for _, t := range fanoutTargets(rd, m.direction == CallDirectionIncoming, true) {
@@ -119,36 +120,45 @@ func (e *engine) maybeStartMedia(callID string) {
 	e.c.log.Info().Str("call_id", callID).Msg("starting media")
 	go func() {
 		defer clear(callKey)
-		if err := e.runMedia(mctx, callID, call, callKey, selfLID, peerLID, rd, inbound); err != nil {
+		if err := e.runMedia(mctx, callID, call, callKey, selfLID, peerLID, rd, inbound, gate); err != nil {
 			if mediaEndedNormally(err) {
 				e.c.log.Debug().Err(err).Str("call_id", callID).Msg("media ended")
 			} else {
 				e.c.log.Warn().Err(err).Str("call_id", callID).Msg("media ended")
 			}
 		}
-		e.allowMediaRestart(mctx, cancel, callID, m)
+		e.allowMediaRestart(mctx, cancel, callID, m, ringing)
 	}()
 }
 
 // allowMediaRestart runs after runMedia returns on its own (ctx not cancelled).
-// Media now starts on the offer, so it can fail while the call is still ringing
-// (no reachable relay, a relay error); clearing started lets Answer or a later
-// relay update start it again. Answered and group calls are left as they are.
-func (e *engine) allowMediaRestart(mctx context.Context, cancel context.CancelFunc, callID string, m *engineCall) {
+// Media can start while ringing (early media), so it can fail before Answer (no
+// reachable relay, a relay error). For a run that started while ringing, under
+// e.mu: if the call is still unanswered, started is cleared so Answer or a later
+// relay update starts media again; if Answer landed while the run was ending
+// (it saw started=true and did not start media), media is restarted here.
+// Answered-at-start and group runs are left as they are.
+func (e *engine) allowMediaRestart(mctx context.Context, cancel context.CancelFunc, callID string, m *engineCall, startedRinging bool) {
 	if mctx.Err() != nil {
 		return
 	}
 	e.mu.Lock()
-	reset := e.calls[callID] == m && m.started && !m.group &&
-		m.direction == CallDirectionIncoming && !m.answered
+	reset := startedRinging && e.calls[callID] == m && m.started && !m.group &&
+		m.direction == CallDirectionIncoming
+	restart := reset && m.answered
 	if reset {
 		m.started = false
 		m.cancel = nil
 		m.mediaRelays = nil
+		m.sendGate = nil
 	}
 	e.mu.Unlock()
 	cancel()
-	if reset {
+	switch {
+	case restart:
+		e.c.log.Info().Str("call_id", callID).Msg("media ended as the call was answered; restarting it")
+		e.maybeStartMedia(callID)
+	case reset:
 		e.c.log.Info().Str("call_id", callID).Msg("media ended while ringing; Answer will restart it")
 	}
 }
@@ -399,7 +409,7 @@ func closeLateRelayConn(done <-chan relayDialResult) {
 // out with the allocate at t+0, BEFORE any RTP; no STUN binding-requests are ever sent.
 //
 // NOT VALIDATED: live-relay only.
-func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKey []byte, selfLID, peerLID string, rd *relayData, inbound bool) error {
+func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKey []byte, selfLID, peerLID string, rd *relayData, inbound bool, gate *mediaSendGate) error {
 	log := e.c.log
 	selfParticipantID := rtp.FormatE2ESrtpParticipantID(selfLID)
 	ssrc, err := rtp.DeriveWasmParticipantSsrc(callID, selfParticipantID, 0, log)
@@ -445,14 +455,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// The receive loop below only wakes on a packet or on the fanout closing, so
 	// close it as soon as the call ends instead of waiting for the next packet.
 	defer closeFanoutOnCancel(ctx, ch)()
-	// Media (RTP, SRTCP, PLI) goes through the send gate; relay control (consent
-	// ping, allocates, binding-success) always goes straight to ch.
-	e.mu.Lock()
-	var gate *mediaSendGate
-	if mm := e.calls[callID]; mm != nil {
-		gate = mm.sendGate
-	}
-	e.mu.Unlock()
+	// Media (RTP, SRTCP, PLI) goes through the send gate maybeStartMedia created
+	// for this run; relay control (consent ping, allocates, binding-success)
+	// always goes straight to ch.
 	mediaOut := gatedMediaSender{f: ch, gate: gate}
 	if !isGroup {
 		bound := make(map[string]bool, len(ch.names))
@@ -1017,12 +1022,22 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				return
 			case now = <-ticker.C:
 			case <-openedCh:
-				// Answer opened the gate: report right away.
+				// Answer opened the gate: report as soon as our first RTP is out.
 				openedCh = nil
+				for txPipe.SenderStats().PacketsSent == 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(10 * time.Millisecond):
+					}
+				}
 				now = time.Now()
 			}
 			if !gate.IsOpen() {
 				continue // early media listen: no SRTCP before Answer
+			}
+			if gate != nil && txPipe.SenderStats().PacketsSent == 0 {
+				continue // early media listen: first SR only after our first RTP
 			}
 			{
 				nowMs := uint64(now.UnixMilli())
