@@ -317,6 +317,19 @@ func (e *engine) connectOneRelay(ctx context.Context, rd *relayData, ep *relayEn
 	return ch, allocate, nil
 }
 
+// newInboundAudioDecoder returns the decoder for one inbound audio stream: Opus
+// in opus mode (MLow if libopus is unavailable), MLow otherwise.
+func newInboundAudioDecoder(log zerolog.Logger) participantAudioDecoder {
+	if opusMode {
+		od, err := newOpusDecoder()
+		if err == nil {
+			return od
+		}
+		log.Warn().Err(err).Msg("opus decoder unavailable; falling back to MLow")
+	}
+	return mlow.NewMlowDecoder(mlow.WithLogger(log))
+}
+
 // mediaRecvError maps a receive error: once ctx is done the fanout was closed on
 // purpose (call ended), so the result is ctx's error, not a relay failure.
 func mediaRecvError(ctx context.Context, err error) error {
@@ -491,16 +504,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			callKey,
 			selfLID,
 			peerLID,
-			func() participantAudioDecoder {
-				if opusMode {
-					od, err := newOpusDecoder()
-					if err == nil {
-						return od
-					}
-					log.Warn().Err(err).Msg("opus decoder unavailable; falling back to MLow")
-				}
-				return mlow.NewMlowDecoder(mlow.WithLogger(log))
-			},
+			func() participantAudioDecoder { return newInboundAudioDecoder(log) },
 			WithLogger(log),
 		)
 		if err != nil {
@@ -1353,6 +1357,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		}
 		if kind != mediaPayloadAudio {
 			log.Debug().Uint8("payload_type", vh.PayloadType).Uint32("ssrc", vh.Ssrc).Msg("dropping unknown RTP payload")
+			if log.GetLevel() <= zerolog.DebugLevel {
+				audioReceivers.InspectUnknownPayload(pkt)
+			}
 			e.c.diag.Emit("rtp", map[string]any{
 				"event": "unknown_payload", "pt": vh.PayloadType, "ssrc": vh.Ssrc,
 				"seq": vh.SequenceNumber, "ts": vh.Timestamp,
@@ -1365,6 +1372,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				log.Warn().Uint32("ssrc", vh.Ssrc).Int("bytes", n).Msg("audio RTP did not match an authenticated active participant")
 			}
 			e.c.diag.Emit("srtp", map[string]any{"event": "unprotect_failed", "ssrc": vh.Ssrc, "bytes": n})
+			continue
+		}
+		if audio.Dropped {
 			continue
 		}
 		audioReception.Observe(audio.SSRC, vh.SequenceNumber, audio.Timestamp, uint64(time.Now().UnixMilli()), SampleRate)

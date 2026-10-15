@@ -26,6 +26,9 @@ type decodedParticipantAudio struct {
 	SSRC          uint32
 	Timestamp     uint32
 	PCM           []float32
+	// Dropped marks an authenticated packet whose payload could not be used
+	// (a malformed RED payload); it is not decoded or played.
+	Dropped bool
 }
 
 type unprotectedParticipantMedia struct {
@@ -116,6 +119,9 @@ type participantReceiveRegistry struct {
 	installedEpoch   installedGroupRawEpoch
 	hasEpoch         bool
 	log              zerolog.Logger
+
+	formatMu     sync.Mutex
+	formatLogged map[uint8]bool // audio PTs whose payload format was logged
 }
 
 func newParticipantReceiveRegistry(
@@ -845,6 +851,47 @@ func (r *participantReceiveRegistry) ActiveVideoSSRCs() []uint32 {
 	return ssrcs
 }
 
+// firstPayloadOfType reports whether this is the first audio payload of type pt
+// in this call, for the once-per-type format log.
+func (r *participantReceiveRegistry) firstPayloadOfType(pt uint8) bool {
+	r.formatMu.Lock()
+	defer r.formatMu.Unlock()
+	if r.formatLogged[pt] {
+		return false
+	}
+	if r.formatLogged == nil {
+		r.formatLogged = make(map[uint8]bool)
+	}
+	r.formatLogged[pt] = true
+	return true
+}
+
+// InspectUnknownPayload decrypts a packet of a payload type the media loop does
+// not handle and logs its format once per type (Debug). It returns false when
+// the packet is not from an authenticated audio receiver.
+func (r *participantReceiveRegistry) InspectUnknownPayload(packet []byte) bool {
+	header, ok := rtp.ParseRtpHeader(packet)
+	if !ok || !r.firstPayloadOfType(header.PayloadType) {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	receiver := r.bySSRC[header.Ssrc]
+	if receiver == nil {
+		r.log.Debug().Uint8("payload_type", header.PayloadType).Uint32("ssrc", header.Ssrc).
+			Msg("unknown RTP payload type on a non-audio SSRC; not decrypted")
+		return false
+	}
+	receiver.mu.Lock()
+	defer receiver.mu.Unlock()
+	authenticatedHeader, payload, ok := receiver.pipe.UnprotectAudio(packet)
+	if !ok {
+		return false
+	}
+	logAudioPayloadFormat(r.log, authenticatedHeader.PayloadType, authenticatedHeader.Ssrc, payload)
+	return true
+}
+
 func (r *participantReceiveRegistry) DecodeAudio(packet []byte) (decodedParticipantAudio, bool) {
 	// Source of truth: https://github.com/purpshell/meowcaller/blob/ca4ba64503efeb86c337ee37cb00c4da540c632c/datasheets/group-media-receive.md#L37-L44
 	header, ok := rtp.ParseRtpHeader(packet)
@@ -868,6 +915,23 @@ func (r *participantReceiveRegistry) DecodeAudio(packet []byte) (decodedParticip
 			Str("participant_id", receiver.participantID).
 			Msg("participant audio failed authentication")
 		return decodedParticipantAudio{}, false
+	}
+	pt := authenticatedHeader.PayloadType
+	if pt != rtp.RtpPayloadTypeOpus && r.firstPayloadOfType(pt) {
+		logAudioPayloadFormat(r.log, pt, authenticatedHeader.Ssrc, payload)
+	}
+	if pt == rtpPayloadTypeAudioRED {
+		primary, err := redPrimary(payload)
+		if err != nil {
+			r.log.Debug().Err(err).Uint32("ssrc", authenticatedHeader.Ssrc).
+				Uint16("seq", authenticatedHeader.SequenceNumber).Int("payload_bytes", len(payload)).
+				Msg("dropping malformed RED audio payload")
+			return decodedParticipantAudio{
+				ParticipantID: receiver.participantID, SSRC: authenticatedHeader.Ssrc,
+				Timestamp: authenticatedHeader.Timestamp, Dropped: true,
+			}, true
+		}
+		payload = primary
 	}
 	pcm := receiver.decoder.Decode(payload)
 	return decodedParticipantAudio{
