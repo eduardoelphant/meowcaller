@@ -91,6 +91,10 @@ type engineCall struct {
 	// nil until media starts. Latency probes are echoed only for these, since
 	// later relay blocks can name relays the fanout never bound.
 	mediaRelays map[string]bool
+
+	// sendGate holds back RTP/SRTCP of an inbound call started while ringing in
+	// EarlyMediaListen mode; Answer opens it. nil means sending is allowed.
+	sendGate *mediaSendGate
 }
 
 // newEngine creates the engine for a Client.
@@ -746,7 +750,11 @@ func (e *engine) answer(c *Call) error {
 	m.acceptPending = true
 	m.answered = true
 	muteSeen, from, creator, inbound := m.earlyMuteSeen, m.earlyMuteFrom, m.earlyMuteCreator, m.inboundSeen
+	gate := m.sendGate
 	e.mu.Unlock()
+	if gate.Open() {
+		e.c.log.Info().Str("call_id", c.id).Msg("early media: sending enabled on answer")
+	}
 
 	e.maybeStartMedia(c.id)
 	if muteSeen {

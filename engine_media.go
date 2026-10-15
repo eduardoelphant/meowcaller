@@ -68,6 +68,12 @@ func (e *engine) maybeStartMedia(callID string) {
 		e.mu.Unlock()
 		return
 	}
+	// Inbound 1:1 calls still ringing follow the early-media mode.
+	ringing := !m.group && m.direction == CallDirectionIncoming && !m.answered
+	if ringing && e.c.earlyMedia == EarlyMediaOff {
+		e.mu.Unlock()
+		return
+	}
 	rd := m.relay
 	if m.group {
 		groupRelay, err := groupRelayData(*m.groupUpdate, m.direction == CallDirectionIncoming)
@@ -83,6 +89,11 @@ func (e *engine) maybeStartMedia(callID string) {
 		return
 	}
 	m.started = true
+	m.sendGate = nil
+	if ringing && e.c.earlyMedia == EarlyMediaListen {
+		m.sendGate = newClosedMediaSendGate()
+		e.c.log.Info().Str("call_id", callID).Msg("early media listen: ringing")
+	}
 	if !m.group {
 		m.mediaRelays = map[string]bool{}
 		for _, t := range fanoutTargets(rd, m.direction == CallDirectionIncoming, true) {
@@ -434,6 +445,15 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	// The receive loop below only wakes on a packet or on the fanout closing, so
 	// close it as soon as the call ends instead of waiting for the next packet.
 	defer closeFanoutOnCancel(ctx, ch)()
+	// Media (RTP, SRTCP, PLI) goes through the send gate; relay control (consent
+	// ping, allocates, binding-success) always goes straight to ch.
+	e.mu.Lock()
+	var gate *mediaSendGate
+	if mm := e.calls[callID]; mm != nil {
+		gate = mm.sendGate
+	}
+	e.mu.Unlock()
+	mediaOut := gatedMediaSender{f: ch, gate: gate}
 	if !isGroup {
 		bound := make(map[string]bool, len(ch.names))
 		for _, name := range ch.names {
@@ -809,6 +829,9 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				return
 			case <-ticker.C:
 			}
+			if !gate.IsOpen() {
+				continue // early media listen: no RTP before Answer
+			}
 			frame := silence
 			if player, _ := callPlayerSink(call); player != nil {
 				if f := player.nextFrame(); f != nil {
@@ -834,7 +857,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				"frame": txCount, "frame_samples": len(frame), "pcm_rms": rmsFloat32(frame),
 				"payload_len": len(payload), "packet_len": len(packet),
 			})
-			if _, err := ch.Send(packet); err != nil {
+			if _, err := mediaOut.Send(packet); err != nil {
 				return
 			}
 			if txCount++; txCount == 1 {
@@ -899,7 +922,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 	}
 	vsender := &videoSender{
 		pipe: txVideoPipe, stream: rtp.NewVideoRtpStream(videoSelfSsrc, defaultVideoRtpStepSamples),
-		ch: ch, ssrc: videoSelfSsrc, callID: callID, keyframeRequired: true,
+		ch: mediaOut, ssrc: videoSelfSsrc, callID: callID, keyframeRequired: true,
 		log: log, diag: e.c.diag,
 	}
 	txAppDataPipe, err := NewMediaPipeline(callKey, selfLID, peerLID, appDataSelfSsrc, FrameSamples, WithLogger(log))
@@ -916,7 +939,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 				"ts": header.Timestamp, "pt": header.PayloadType, "bytes": len(packet),
 			})
 		}
-		return ch.Send(packet)
+		return mediaOut.Send(packet)
 	})
 	e.mu.Lock()
 	if m := e.calls[callID]; m != nil {
@@ -986,11 +1009,22 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 		ticker := time.NewTicker(1500 * time.Millisecond)
 		defer ticker.Stop()
 		var sent uint64
+		openedCh := gate.Opened()
 		for {
+			var now time.Time
 			select {
 			case <-ctx.Done():
 				return
-			case now := <-ticker.C:
+			case now = <-ticker.C:
+			case <-openedCh:
+				// Answer opened the gate: report right away.
+				openedCh = nil
+				now = time.Now()
+			}
+			if !gate.IsOpen() {
+				continue // early media listen: no SRTCP before Answer
+			}
+			{
 				nowMs := uint64(now.UnixMilli())
 				e.mu.Lock()
 				current := e.calls[callID]
@@ -1010,7 +1044,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 					audioReports,
 					groupMode.Load() && audioReceivers.HasCommittedGroupUpdate(),
 					func(packet []byte) error {
-						_, sendErr := ch.Send(packet)
+						_, sendErr := mediaOut.Send(packet)
 						return sendErr
 					},
 				)
@@ -1027,7 +1061,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 						videoReports,
 						groupMode.Load() && audioReceivers.HasCommittedGroupUpdate(),
 						func(packet []byte) error {
-							_, sendErr := ch.Send(packet)
+							_, sendErr := mediaOut.Send(packet)
 							return sendErr
 						},
 					)
@@ -1304,7 +1338,7 @@ func (e *engine) runMedia(ctx context.Context, callID string, call *Call, callKe
 			if recoveryNeeded && shouldSendVideoPLI(lastVideoPLI, vh.Ssrc, time.Now()) {
 				packet, feedbackErr := videoRtcp.pictureLossIndication(vh.Ssrc)
 				if feedbackErr == nil {
-					_, feedbackErr = ch.Send(packet)
+					_, feedbackErr = mediaOut.Send(packet)
 				}
 				if feedbackErr != nil {
 					log.Warn().Err(feedbackErr).Uint32("ssrc", vh.Ssrc).Msg("failed to request video keyframe after RTP loss")

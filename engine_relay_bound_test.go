@@ -105,6 +105,7 @@ func TestLatencyEchoesOfferedRelaysBeforeMedia(t *testing.T) {
 func TestMediaRelaysNarrowToConnectedRelays(t *testing.T) {
 	rd := testRelayData("a", "b")
 	eng, _, sent := testRingingInbound(t, rd)
+	eng.c.earlyMedia = EarlyMediaFull
 	badAddr := rd.endpoints[1].addresses[0].ipv4
 	eng.dialRelay = func(addr *net.UDPAddr) (relayConn, error) {
 		if addr.IP.String() == badAddr {
@@ -130,6 +131,7 @@ func TestMediaRelaysNarrowToConnectedRelays(t *testing.T) {
 
 func TestMediaExitWhileRingingAllowsRestart(t *testing.T) {
 	eng, call, _ := testRingingInbound(t, testRelayData("a"))
+	eng.c.earlyMedia = EarlyMediaFull
 	var dials int
 	var mu sync.Mutex
 	eng.dialRelay = func(*net.UDPAddr) (relayConn, error) {

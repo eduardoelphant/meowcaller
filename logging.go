@@ -14,6 +14,7 @@ type config struct {
 	log         zerolog.Logger
 	diag        *diag.Recorder
 	offerFilter func(*events.CallOffer) bool
+	earlyMedia  EarlyMediaMode
 }
 
 func resolveConfig(opts []Option) config {
