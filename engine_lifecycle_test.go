@@ -351,6 +351,31 @@ func TestHangupTearsDownLocallyWhenSignalingFails(t *testing.T) {
 	}
 }
 
+func TestOutgoingPeerRejectSendsTerminate(t *testing.T) {
+	eng, call := testEngineWithOutgoingCall()
+	var sent []waBinary.Node
+	eng.sendCallNode = func(_ context.Context, node waBinary.Node) error {
+		sent = append(sent, node)
+		return nil
+	}
+	var reason string
+	call.OnEnd(func(got string) { reason = got })
+	rejecting := peerJID()
+	rejecting.Device = 15
+
+	eng.onReject(&events.CallReject{BasicCallMeta: types.BasicCallMeta{CallID: "CID", From: rejecting}})
+
+	if call.State() != CallPhaseEnded || reason != "rejected" {
+		t.Fatalf("end state = (%d, %q), want (Ended, rejected)", call.State(), reason)
+	}
+	if len(sent) != 1 || len(sent[0].GetChildren()) != 1 || sent[0].GetChildren()[0].Tag != "terminate" {
+		t.Fatalf("sent %#v, want one terminate", sent)
+	}
+	if got := sent[0].GetChildren()[0].Attrs["call-id"]; got != "CID" {
+		t.Fatalf("terminate call-id = %v, want CID", got)
+	}
+}
+
 func TestOutgoingPeerAcceptLifecycle(t *testing.T) {
 	eng, call := testEngineWithOutgoingCall()
 	from := types.JID{User: "222222222222222", Server: types.HiddenUserServer}

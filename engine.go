@@ -1086,7 +1086,10 @@ func preferQualifiedPeer(current string, signaled types.JID) string {
 	return signaled.String()
 }
 
-// onReject tears down an outgoing call when the peer declines it.
+// onReject tears down an outgoing call when the peer declines it. A reject from one
+// of the peer's devices does not stop WhatsApp ringing the others, so an outgoing
+// call also sends a terminate; otherwise another device could still answer a call
+// that is already gone here and sit in "reconnecting".
 func (e *engine) onReject(ev *events.CallReject) {
 	m := e.lookup(ev.CallID)
 	if m == nil {
@@ -1099,7 +1102,18 @@ func (e *engine) onReject(ev *events.CallReject) {
 	e.c.diag.Emit("meta", map[string]any{
 		"event": "peer_reject", "call_id": ev.CallID, "from": ev.From.String(),
 	})
+	e.mu.Lock()
+	outgoing, to, creator := m.direction == CallDirectionOutgoing, m.from, m.creator
+	e.mu.Unlock()
 	e.finishCall(ev.CallID, "rejected")
+	if !outgoing {
+		return
+	}
+	term := signaling.BuildTerminate(&signaling.TerminateParams{CallID: ev.CallID, To: to, CallCreator: creator})
+	term.Attrs["id"] = e.nextCallNodeID()
+	if err := e.transmitCallNode(context.Background(), term); err != nil {
+		e.c.log.Warn().Err(err).Str("call_id", ev.CallID).Msg("send terminate after peer reject failed")
+	}
 }
 
 // rlProbe is one relay candidate from a relaylatency probe.

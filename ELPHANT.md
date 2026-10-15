@@ -33,6 +33,7 @@ used by the Elphant fork of GOWA
 | `WithEarlyMedia` option (`early_media.go`, `engine.go`, `engine_media.go`) | Since PR #43, media while ringing made WhatsApp Web show the call as connected and stopped the callee's other devices ringing. `EarlyMediaOff` (default) starts media on Answer; `EarlyMediaListen` connects relays and allocates but sends no RTP or SRTCP until Answer; `EarlyMediaFull` keeps the PR #43 behaviour. Inbound 1:1 calls only: Off and Listen do not cover inbound group calls, where a `group_update` with relay and epoch while ringing may still start media |
 | `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
 | `opus.NewEncoderChannels` (`opus/opus.go`, `opus/opus_nocgo.go`) | Stereo encoder with forced stereo, for GOWA's call recorder (agent left, customer right, one Ogg Opus stream); `NewEncoder` is now the mono case of it |
+| Terminate after a peer reject on an outgoing call (`engine.go`) | A reject from one of the callee's devices (for example an integration that rejects calls automatically) ended the call here while WhatsApp kept ringing the callee's other devices; answering there left the callee in "reconnecting". The engine now sends a terminate after the reject, so the call ends everywhere |
 
 ## Versions
 
@@ -40,6 +41,7 @@ used by the Elphant fork of GOWA
 - `v0.2.0-elphant.1`: relay fanout and stale offer gate (PR #26), media on the offer (PR #43),
   fixes on top of both, instrumentation, `WithOfferFilter` and the `!cgo` Opus stub.
 - `v0.2.0-elphant.5`: `opus.NewEncoderChannels` (stereo, forced channels) for GOWA's stereo call recording.
+- `v0.2.0-elphant.6`: terminate after a peer reject on an outgoing call.
 
 ## Syncing with upstream
 
