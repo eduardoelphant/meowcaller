@@ -1,6 +1,7 @@
 package meowcaller
 
 import (
+	"bytes"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -16,10 +17,13 @@ import (
 // whatsapp-rust names PT 121 RTP_PAYLOAD_TYPE_MLOW_RED; PT 122 is taken to be the
 // Opus counterpart. The primary (last) block goes to the same decoder as PT 120.
 //
-// Unverified: the exact block layout. RFC 2198 is implemented here; the Debug
-// "inbound audio payload format" line also logs mlow.DepackSplitRed's view
-// (2-byte redundant headers) so a live call shows which layout WhatsApp uses.
-// For a primary-only packet the two layouts are identical (one header byte).
+// Unverified: the exact block layout. Both layouts are tried: WhatsApp's own
+// SplitRed (mlow.DepackSplitRed, 2-byte redundant headers) and RFC 2198 (4-byte
+// headers). A layout counts only if its headers and block lengths account for
+// the whole payload; SplitRed is preferred when both do, and the other layout's
+// primary is tried if the preferred one does not decode. For a primary-only
+// packet the two layouts are identical (one header byte). The Debug "inbound
+// audio payload format" line logs both parses and the layout chosen.
 //
 // PT 121 is left on its existing path (raw payload to the decoder): the MLow
 // decoder does WhatsApp's own SplitRed depacketization when redundancy is set.
@@ -91,6 +95,52 @@ func parseRED(p []byte) ([]redBlock, error) {
 	return blocks, nil
 }
 
+const (
+	redLayoutSplitRed = "splitred"
+	redLayoutRFC2198  = "rfc2198"
+)
+
+// redCandidate is one layout's reading of a RED payload's primary block.
+type redCandidate struct {
+	layout  string
+	primary []byte
+}
+
+// redPrimaryCandidates returns the primary block under every layout whose
+// headers and lengths account for the whole payload: SplitRed first, then
+// RFC 2198 when it reads a different primary.
+func redPrimaryCandidates(p []byte) []redCandidate {
+	var out []redCandidate
+	if frames, err := mlow.DepackSplitRed(p); err == nil && len(frames) > 0 {
+		if main := frames[len(frames)-1]; main.IsMain && len(main.Data) > 0 {
+			out = append(out, redCandidate{layout: redLayoutSplitRed, primary: main.Data})
+		}
+	}
+	if primary, err := redPrimary(p); err == nil {
+		if len(out) == 0 || !bytes.Equal(out[0].primary, primary) {
+			out = append(out, redCandidate{layout: redLayoutRFC2198, primary: primary})
+		}
+	}
+	return out
+}
+
+// decodeREDPrimary decodes the primary block of a RED payload, trying the
+// layouts in preference order and moving on when a primary does not decode
+// (nil PCM). It returns the PCM, the layout used, and false when no layout
+// parses.
+func decodeREDPrimary(dec participantAudioDecoder, p []byte) ([]float32, string, bool) {
+	candidates := redPrimaryCandidates(p)
+	if len(candidates) == 0 {
+		return nil, "", false
+	}
+	for _, c := range candidates {
+		if pcm := dec.Decode(c.primary); pcm != nil {
+			return pcm, c.layout, true
+		}
+	}
+	return nil, candidates[0].layout, true
+}
+
 // redPrimary returns the primary block of an RFC 2198 payload.
 func redPrimary(p []byte) ([]byte, error) {
 	blocks, err := parseRED(p)
@@ -118,7 +168,7 @@ func describeREDBlocks(blocks []redBlock, err error) string {
 
 // logAudioPayloadFormat logs, at Debug, the first bytes of a decrypted audio
 // payload (audio data, not keys) and how the RED parsers read it.
-func logAudioPayloadFormat(log zerolog.Logger, pt uint8, ssrc uint32, payload []byte) {
+func logAudioPayloadFormat(log zerolog.Logger, pt uint8, ssrc uint32, payload []byte, chosen string) {
 	head := payload
 	if len(head) > 8 {
 		head = head[:8]
@@ -141,5 +191,6 @@ func logAudioPayloadFormat(log zerolog.Logger, pt uint8, ssrc uint32, payload []
 		Str("head_hex", hex.EncodeToString(head)).
 		Str("rfc2198", describeREDBlocks(blocks, err)).
 		Str("splitred", splitRed).
+		Str("chosen_layout", chosen).
 		Msg("inbound audio payload format")
 }

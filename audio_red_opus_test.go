@@ -40,12 +40,14 @@ func TestPT122InOpusModeReachesOpusDecoder(t *testing.T) {
 	if _, isOpus := built.(*opus.Decoder); !isOpus {
 		t.Fatalf("inbound decoder in opus mode is %T, want *opus.Decoder", built)
 	}
-	payload := append(append(redHeader(120, 960, len(frame)), 0x78), frame...)
-	payload = append(payload, frame...)
-	packet, _ := protectParticipantRTP(t, callKey, self, peer, 0, rtpPayloadTypeAudioRED, payload)
-
-	audio, ok := registry.DecodeAudio(packet)
-	if !ok || audio.Dropped || len(audio.PCM) != FrameSamples {
-		t.Fatalf("DecodeAudio ok=%v dropped=%v samples=%d, want %d", ok, audio.Dropped, len(audio.PCM), FrameSamples)
+	for name, payload := range map[string][]byte{
+		"rfc2198":  append(append(append(redHeader(120, 960, len(frame)), 0x78), frame...), frame...),
+		"splitred": splitRedPayload(3, frame, frame),
+	} {
+		packet, _ := protectParticipantRTP(t, callKey, self, peer, 0, rtpPayloadTypeAudioRED, payload)
+		audio, ok := registry.DecodeAudio(packet)
+		if !ok || audio.Dropped || len(audio.PCM) != FrameSamples {
+			t.Fatalf("%s: DecodeAudio ok=%v dropped=%v samples=%d, want %d", name, ok, audio.Dropped, len(audio.PCM), FrameSamples)
+		}
 	}
 }

@@ -888,7 +888,7 @@ func (r *participantReceiveRegistry) InspectUnknownPayload(packet []byte) bool {
 	if !ok {
 		return false
 	}
-	logAudioPayloadFormat(r.log, authenticatedHeader.PayloadType, authenticatedHeader.Ssrc, payload)
+	logAudioPayloadFormat(r.log, authenticatedHeader.PayloadType, authenticatedHeader.Ssrc, payload, "")
 	return true
 }
 
@@ -917,13 +917,17 @@ func (r *participantReceiveRegistry) DecodeAudio(packet []byte) (decodedParticip
 		return decodedParticipantAudio{}, false
 	}
 	pt := authenticatedHeader.PayloadType
-	if pt != rtp.RtpPayloadTypeOpus && r.firstPayloadOfType(pt) {
-		logAudioPayloadFormat(r.log, pt, authenticatedHeader.Ssrc, payload)
-	}
+	logFormat := pt != rtp.RtpPayloadTypeOpus && r.firstPayloadOfType(pt)
+	var pcm []float32
 	if pt == rtpPayloadTypeAudioRED {
-		primary, err := redPrimary(payload)
-		if err != nil {
-			r.log.Debug().Err(err).Uint32("ssrc", authenticatedHeader.Ssrc).
+		var layout string
+		var parsed bool
+		pcm, layout, parsed = decodeREDPrimary(receiver.decoder, payload)
+		if logFormat {
+			logAudioPayloadFormat(r.log, pt, authenticatedHeader.Ssrc, payload, layout)
+		}
+		if !parsed {
+			r.log.Debug().Uint32("ssrc", authenticatedHeader.Ssrc).
 				Uint16("seq", authenticatedHeader.SequenceNumber).Int("payload_bytes", len(payload)).
 				Msg("dropping malformed RED audio payload")
 			return decodedParticipantAudio{
@@ -931,9 +935,12 @@ func (r *participantReceiveRegistry) DecodeAudio(packet []byte) (decodedParticip
 				Timestamp: authenticatedHeader.Timestamp, Dropped: true,
 			}, true
 		}
-		payload = primary
+	} else {
+		if logFormat {
+			logAudioPayloadFormat(r.log, pt, authenticatedHeader.Ssrc, payload, "")
+		}
+		pcm = receiver.decoder.Decode(payload)
 	}
-	pcm := receiver.decoder.Decode(payload)
 	return decodedParticipantAudio{
 		ParticipantID: receiver.participantID,
 		UserJID:       receiver.userJID, DeviceJID: receiver.deviceJID,

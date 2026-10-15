@@ -146,3 +146,87 @@ func TestPayloadFormatLoggedOncePerType(t *testing.T) {
 		t.Fatal("PT 121 format should log once on its own")
 	}
 }
+
+// splitRedPayload builds a WhatsApp SplitRed payload: one 2-byte redundant
+// header (0x80|code, size), the 1-byte main marker, the redundant block, the main.
+func splitRedPayload(code uint8, red, main []byte) []byte {
+	p := []byte{0x80 | code, byte(len(red)), 0x01}
+	p = append(p, red...)
+	return append(p, main...)
+}
+
+// rejectingDecoder returns nil (decode failure) for payloads starting with a
+// rejected byte, and one sample holding the first byte otherwise.
+type rejectingDecoder struct {
+	reject   byte
+	payloads [][]byte
+}
+
+func (d *rejectingDecoder) Decode(payload []byte) []float32 {
+	d.payloads = append(d.payloads, append([]byte(nil), payload...))
+	if len(payload) == 0 || payload[0] == d.reject {
+		return nil
+	}
+	return []float32{float32(payload[0])}
+}
+
+func TestREDSplitRedLayoutYieldsPrimary(t *testing.T) {
+	payload := splitRedPayload(3, []byte{9, 9, 9}, []byte{0x41, 0x42, 0x43, 0x44})
+	// RFC 2198 cannot read this one (its 10-bit length overruns), so only SplitRed counts.
+	if _, err := parseRED(payload); err == nil {
+		t.Fatal("test payload unexpectedly valid as RFC 2198")
+	}
+	c := redPrimaryCandidates(payload)
+	if len(c) != 1 || c[0].layout != redLayoutSplitRed || !bytes.Equal(c[0].primary, []byte{0x41, 0x42, 0x43, 0x44}) {
+		t.Fatalf("candidates = %+v, want SplitRed primary only", c)
+	}
+}
+
+func TestREDRFC2198LayoutStillWorks(t *testing.T) {
+	payload := append(append(redHeader(120, 960, 3), 0x78), 9, 9, 9, 1, 2, 3, 4)
+	c := redPrimaryCandidates(payload)
+	if len(c) != 1 || c[0].layout != redLayoutRFC2198 || !bytes.Equal(c[0].primary, []byte{1, 2, 3, 4}) {
+		t.Fatalf("candidates = %+v, want RFC 2198 primary only", c)
+	}
+}
+
+// bothLayoutsPayload is valid in both layouts with different primaries:
+// SplitRed reads main [10 11 12 13]; RFC 2198 reads primary [11 12 13].
+var bothLayoutsPayload = []byte{0x80, 0x02, 0x00, 0x01, 0x05, 0x10, 0x11, 0x12, 0x13}
+
+func TestREDPrefersSplitRedWhenBothValid(t *testing.T) {
+	c := redPrimaryCandidates(bothLayoutsPayload)
+	if len(c) != 2 || c[0].layout != redLayoutSplitRed || c[1].layout != redLayoutRFC2198 {
+		t.Fatalf("candidates = %+v, want SplitRed then RFC 2198", c)
+	}
+	dec := &rejectingDecoder{reject: 0xff}
+	pcm, layout, ok := decodeREDPrimary(dec, bothLayoutsPayload)
+	if !ok || layout != redLayoutSplitRed || len(pcm) != 1 || pcm[0] != 0x10 || len(dec.payloads) != 1 {
+		t.Fatalf("decode = %v %q %v (%d decodes), want SplitRed primary in one decode", pcm, layout, ok, len(dec.payloads))
+	}
+}
+
+func TestREDFallsBackToOtherLayoutOnDecodeFailure(t *testing.T) {
+	dec := &rejectingDecoder{reject: 0x10} // the SplitRed primary does not decode
+	pcm, layout, ok := decodeREDPrimary(dec, bothLayoutsPayload)
+	if !ok || layout != redLayoutRFC2198 || len(pcm) != 1 || pcm[0] != 0x11 {
+		t.Fatalf("decode = %v %q %v, want the RFC 2198 primary", pcm, layout, ok)
+	}
+}
+
+func TestDecodeAudioUnwrapsSplitRedPT122(t *testing.T) {
+	callKey := iota32()
+	self := mediaTestJID("111111111111111", 0)
+	peer := mediaTestJID("222222222222222", 0)
+	dec := &recordingParticipantDecoder{}
+	registry, err := newParticipantReceiveRegistry("CID", callKey, self.String(), peer.String(), func() participantAudioDecoder { return dec })
+	if err != nil {
+		t.Fatalf("new registry: %v", err)
+	}
+	payload := splitRedPayload(3, []byte{9, 9, 9}, []byte{0x41, 0x42, 0x43})
+	packet, _ := protectParticipantRTP(t, callKey, self, peer, 0, rtpPayloadTypeAudioRED, payload)
+	audio, ok := registry.DecodeAudio(packet)
+	if !ok || audio.Dropped || len(dec.payloads) != 1 || !bytes.Equal(dec.payloads[0], []byte{0x41, 0x42, 0x43}) {
+		t.Fatalf("ok=%v dropped=%v decoder got %v, want the SplitRed main", ok, audio.Dropped, dec.payloads)
+	}
+}
