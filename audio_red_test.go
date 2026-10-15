@@ -190,27 +190,45 @@ func TestREDRFC2198LayoutStillWorks(t *testing.T) {
 	}
 }
 
-// bothLayoutsPayload is valid in both layouts with different primaries:
-// SplitRed reads main [10 11 12 13]; RFC 2198 reads primary [11 12 13].
-var bothLayoutsPayload = []byte{0x80, 0x02, 0x00, 0x01, 0x05, 0x10, 0x11, 0x12, 0x13}
+// bothLayoutsPayload is a strict RFC 2198 packet (PT 120, ts offset 960) that
+// also parses as SplitRed: offset byte 0x0f reads as a 15-byte redundant size
+// and 0x00 as the main marker. RFC 2198 reads primary 0x41..0x4c; SplitRed
+// reads main [0x4b 0x4c].
+var bothLayoutsPayload = append(append(redHeader(120, 960, 3), 0x78, 9, 9, 9),
+	0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c)
 
-func TestREDPrefersSplitRedWhenBothValid(t *testing.T) {
+func TestREDPrefersStrictRFC2198WhenBothValid(t *testing.T) {
 	c := redPrimaryCandidates(bothLayoutsPayload)
-	if len(c) != 2 || c[0].layout != redLayoutSplitRed || c[1].layout != redLayoutRFC2198 {
-		t.Fatalf("candidates = %+v, want SplitRed then RFC 2198", c)
+	if len(c) != 2 || c[0].layout != redLayoutRFC2198 || c[1].layout != redLayoutSplitRed {
+		t.Fatalf("candidates = %+v, want RFC 2198 then SplitRed", c)
 	}
 	dec := &rejectingDecoder{reject: 0xff}
 	pcm, layout, ok := decodeREDPrimary(dec, bothLayoutsPayload)
-	if !ok || layout != redLayoutSplitRed || len(pcm) != 1 || pcm[0] != 0x10 || len(dec.payloads) != 1 {
-		t.Fatalf("decode = %v %q %v (%d decodes), want SplitRed primary in one decode", pcm, layout, ok, len(dec.payloads))
+	if !ok || layout != redLayoutRFC2198 || len(pcm) != 1 || pcm[0] != 0x41 || len(dec.payloads) != 1 {
+		t.Fatalf("decode = %v %q %v (%d decodes), want the RFC 2198 primary in one decode", pcm, layout, ok, len(dec.payloads))
 	}
 }
 
 func TestREDFallsBackToOtherLayoutOnDecodeFailure(t *testing.T) {
-	dec := &rejectingDecoder{reject: 0x10} // the SplitRed primary does not decode
+	dec := &rejectingDecoder{reject: 0x41} // the RFC 2198 primary does not decode
 	pcm, layout, ok := decodeREDPrimary(dec, bothLayoutsPayload)
-	if !ok || layout != redLayoutRFC2198 || len(pcm) != 1 || pcm[0] != 0x11 {
-		t.Fatalf("decode = %v %q %v, want the RFC 2198 primary", pcm, layout, ok)
+	if !ok || layout != redLayoutSplitRed || len(pcm) != 1 || pcm[0] != 0x4b {
+		t.Fatalf("decode = %v %q %v, want the SplitRed main", pcm, layout, ok)
+	}
+}
+
+func TestRFC2198WithImplausibleHeaderIsNotACandidate(t *testing.T) {
+	for name, hdr := range map[string][]byte{
+		"pt differs":       redHeader(121, 960, 1),
+		"offset not frame": redHeader(120, 500, 1),
+		"zero offset":      redHeader(120, 0, 1),
+	} {
+		payload := append(append(hdr, 0x78, 9), 1, 2, 3)
+		for _, c := range redPrimaryCandidates(payload) {
+			if c.layout == redLayoutRFC2198 {
+				t.Fatalf("%s: RFC 2198 accepted: %+v", name, c)
+			}
+		}
 	}
 }
 

@@ -3,6 +3,7 @@
 package meowcaller
 
 import (
+	"math"
 	"testing"
 
 	"github.com/purpshell/meowcaller/opus"
@@ -48,6 +49,71 @@ func TestPT122InOpusModeReachesOpusDecoder(t *testing.T) {
 		audio, ok := registry.DecodeAudio(packet)
 		if !ok || audio.Dropped || len(audio.PCM) != FrameSamples {
 			t.Fatalf("%s: DecodeAudio ok=%v dropped=%v samples=%d, want %d", name, ok, audio.Dropped, len(audio.PCM), FrameSamples)
+		}
+	}
+}
+
+// opusTestFrames encodes n consecutive 60 ms frames of a varying tone.
+func opusTestFrames(t *testing.T, n int) [][]byte {
+	t.Helper()
+	enc, err := opus.NewEncoder(SampleRate, 24000, 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames := make([][]byte, 0, n)
+	for f := 0; f < n; f++ {
+		pcm := make([]float32, FrameSamples)
+		for i := range pcm {
+			x := float64(f*FrameSamples+i) / SampleRate
+			pcm[i] = float32(0.4*math.Sin(2*math.Pi*(220+float64(f%7)*40)*x) + 0.05*math.Sin(2*math.Pi*3100*x))
+		}
+		frame, err := enc.Encode(pcm)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(frame) > 255 {
+			t.Fatalf("frame %d is %d bytes, too long for a SplitRed block", f, len(frame))
+		}
+		frames = append(frames, frame)
+	}
+	return frames
+}
+
+func TestRealRFC2198OpusStreamChoosesRFC2198(t *testing.T) {
+	if err := SetCodec("opus"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetCodec("mlow") })
+	frames := opusTestFrames(t, 50)
+	dec, err := opus.NewDecoder(SampleRate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(frames); i++ {
+		payload := append(append(redHeader(120, 960, len(frames[i-1])), 0x78), frames[i-1]...)
+		payload = append(payload, frames[i]...)
+		pcm, layout, ok := decodeREDPrimary(dec, payload)
+		if !ok || layout != redLayoutRFC2198 || len(pcm) != FrameSamples {
+			t.Fatalf("packet %d: layout %q ok=%v samples=%d, want rfc2198 and %d", i, layout, ok, len(pcm), FrameSamples)
+		}
+	}
+}
+
+func TestRealSplitRedOpusStreamChoosesSplitRed(t *testing.T) {
+	if err := SetCodec("opus"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = SetCodec("mlow") })
+	frames := opusTestFrames(t, 50)
+	dec, err := opus.NewDecoder(SampleRate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < len(frames); i++ {
+		payload := splitRedPayload(1, frames[i-1], frames[i])
+		pcm, layout, ok := decodeREDPrimary(dec, payload)
+		if !ok || layout != redLayoutSplitRed || len(pcm) != FrameSamples {
+			t.Fatalf("packet %d: layout %q ok=%v samples=%d, want splitred and %d", i, layout, ok, len(pcm), FrameSamples)
 		}
 	}
 }

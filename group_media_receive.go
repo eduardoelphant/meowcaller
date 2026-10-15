@@ -851,6 +851,13 @@ func (r *participantReceiveRegistry) ActiveVideoSSRCs() []uint32 {
 	return ssrcs
 }
 
+// payloadTypeLogged reports whether pt's format was already logged.
+func (r *participantReceiveRegistry) payloadTypeLogged(pt uint8) bool {
+	r.formatMu.Lock()
+	defer r.formatMu.Unlock()
+	return r.formatLogged[pt]
+}
+
 // firstPayloadOfType reports whether this is the first audio payload of type pt
 // in this call, for the once-per-type format log.
 func (r *participantReceiveRegistry) firstPayloadOfType(pt uint8) bool {
@@ -871,21 +878,25 @@ func (r *participantReceiveRegistry) firstPayloadOfType(pt uint8) bool {
 // the packet is not from an authenticated audio receiver.
 func (r *participantReceiveRegistry) InspectUnknownPayload(packet []byte) bool {
 	header, ok := rtp.ParseRtpHeader(packet)
-	if !ok || !r.firstPayloadOfType(header.PayloadType) {
+	if !ok || r.payloadTypeLogged(header.PayloadType) {
 		return false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	receiver := r.bySSRC[header.Ssrc]
 	if receiver == nil {
-		r.log.Debug().Uint8("payload_type", header.PayloadType).Uint32("ssrc", header.Ssrc).
-			Msg("unknown RTP payload type on a non-audio SSRC; not decrypted")
+		// Keyed with the high bit set (PTs are 7-bit) so this note logs once
+		// without blocking a later decrypted log of the same PT.
+		if r.firstPayloadOfType(header.PayloadType | 0x80) {
+			r.log.Debug().Uint8("payload_type", header.PayloadType).Uint32("ssrc", header.Ssrc).
+				Msg("unknown RTP payload type on a non-audio SSRC; not decrypted")
+		}
 		return false
 	}
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
 	authenticatedHeader, payload, ok := receiver.pipe.UnprotectAudio(packet)
-	if !ok {
+	if !ok || !r.firstPayloadOfType(authenticatedHeader.PayloadType) {
 		return false
 	}
 	logAudioPayloadFormat(r.log, authenticatedHeader.PayloadType, authenticatedHeader.Ssrc, payload, "")

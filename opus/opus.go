@@ -66,6 +66,20 @@ func (e *Encoder) Encode(pcm []float32) ([]byte, error) {
 	return append([]byte(nil), e.out[:n]...), nil
 }
 
+// PacketSamples returns the number of samples per channel an Opus packet
+// decodes to at sampleRate, without decoding it (opus_packet_get_nb_samples).
+func PacketSamples(pkt []byte, sampleRate int) (int, error) {
+	if len(pkt) == 0 {
+		return 0, fmt.Errorf("opus: empty packet")
+	}
+	n := C.opus_packet_get_nb_samples((*C.uchar)(unsafe.Pointer(&pkt[0])), C.opus_int32(len(pkt)), C.opus_int32(sampleRate))
+	runtime.KeepAlive(pkt)
+	if n < 0 {
+		return 0, fmt.Errorf("opus: packet samples: %d", int(n))
+	}
+	return int(n), nil
+}
+
 // Decoder decodes packets to mono float32.
 type Decoder struct {
 	dec *C.OpusDecoder

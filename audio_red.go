@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/purpshell/meowcaller/mlow"
+	"github.com/purpshell/meowcaller/opus"
 	"github.com/rs/zerolog"
 )
 
@@ -17,11 +18,11 @@ import (
 // whatsapp-rust names PT 121 RTP_PAYLOAD_TYPE_MLOW_RED; PT 122 is taken to be the
 // Opus counterpart. The primary (last) block goes to the same decoder as PT 120.
 //
-// Unverified: the exact block layout. Both layouts are tried: WhatsApp's own
-// SplitRed (mlow.DepackSplitRed, 2-byte redundant headers) and RFC 2198 (4-byte
-// headers). A layout counts only if its headers and block lengths account for
-// the whole payload; SplitRed is preferred when both do, and the other layout's
-// primary is tried if the preferred one does not decode. For a primary-only
+// Unverified: the exact block layout. Both layouts are tried: RFC 2198 (4-byte
+// headers) and WhatsApp's own SplitRed (mlow.DepackSplitRed, 2-byte redundant
+// headers). A layout counts only if it parses with no block overrun and passes
+// the plausibility checks in redPrimaryCandidates; the next candidate is tried
+// if a primary does not decode. For a primary-only
 // packet the two layouts are identical (one header byte). The Debug "inbound
 // audio payload format" line logs both parses and the layout chosen.
 //
@@ -106,28 +107,68 @@ type redCandidate struct {
 	primary []byte
 }
 
-// redPrimaryCandidates returns the primary block under every layout whose
-// headers and lengths account for the whole payload: SplitRed first, then
-// RFC 2198 when it reads a different primary.
+// redPrimaryCandidates returns the plausible primary blocks of a RED payload in
+// the order to try them. A layout is considered only if it parses with no block
+// overrun and passes plausibility checks:
+//   - RFC 2198: every redundant block has the primary's PT and a timestamp
+//     offset that is a positive multiple of one frame (960) below 16384. Real
+//     RFC 2198 packets with a 960 offset also parse as SplitRed (offset byte 15
+//     read as a size, 0x00 as the main marker), so a strict RFC 2198 parse is
+//     tried first.
+//   - In opus mode, the primary must be an Opus packet of exactly one frame
+//     (960 samples at 16 kHz); libopus accepts many wrong slices as a TOC, so a
+//     decode alone does not tell a wrong layout apart.
+//
+// Order: RFC 2198 (when it passes), then SplitRed.
 func redPrimaryCandidates(p []byte) []redCandidate {
 	var out []redCandidate
-	if frames, err := mlow.DepackSplitRed(p); err == nil && len(frames) > 0 {
-		if main := frames[len(frames)-1]; main.IsMain && len(main.Data) > 0 {
-			out = append(out, redCandidate{layout: redLayoutSplitRed, primary: main.Data})
+	add := func(layout string, primary []byte) {
+		if len(primary) == 0 || !plausibleAudioPrimary(primary) {
+			return
 		}
+		for _, c := range out {
+			if bytes.Equal(c.primary, primary) {
+				return
+			}
+		}
+		out = append(out, redCandidate{layout: layout, primary: primary})
 	}
-	if primary, err := redPrimary(p); err == nil {
-		if len(out) == 0 || !bytes.Equal(out[0].primary, primary) {
-			out = append(out, redCandidate{layout: redLayoutRFC2198, primary: primary})
+	if blocks, err := parseRED(p); err == nil && rfc2198Plausible(blocks) {
+		add(redLayoutRFC2198, blocks[len(blocks)-1].Data)
+	}
+	if frames, err := mlow.DepackSplitRed(p); err == nil && len(frames) > 0 {
+		if main := frames[len(frames)-1]; main.IsMain {
+			add(redLayoutSplitRed, main.Data)
 		}
 	}
 	return out
 }
 
+// rfc2198Plausible checks an RFC 2198 parse: redundant blocks carry the
+// primary's PT and frame-aligned timestamp offsets.
+func rfc2198Plausible(blocks []redBlock) bool {
+	primary := blocks[len(blocks)-1]
+	for _, b := range blocks[:len(blocks)-1] {
+		if b.PT != primary.PT || b.TSOffset == 0 || b.TSOffset >= 16384 || b.TSOffset%FrameSamples != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// plausibleAudioPrimary reports whether a primary block can be one audio frame.
+// Only Opus can be checked without decoding; MLow primaries always pass.
+func plausibleAudioPrimary(primary []byte) bool {
+	if !opusMode {
+		return true
+	}
+	n, err := opus.PacketSamples(primary, SampleRate)
+	return err == nil && n == FrameSamples
+}
+
 // decodeREDPrimary decodes the primary block of a RED payload, trying the
-// layouts in preference order and moving on when a primary does not decode
-// (nil PCM). It returns the PCM, the layout used, and false when no layout
-// parses.
+// candidates in order and moving on when a primary does not decode (nil PCM).
+// It returns the PCM, the layout used, and false when no layout is plausible.
 func decodeREDPrimary(dec participantAudioDecoder, p []byte) ([]float32, string, bool) {
 	candidates := redPrimaryCandidates(p)
 	if len(candidates) == 0 {

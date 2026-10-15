@@ -38,3 +38,20 @@ func TestDecodeGarbageReturnsNil(t *testing.T) {
 		t.Fatalf("want nil for an invalid packet, got %d samples", len(out))
 	}
 }
+
+func TestPacketSamplesReportsFrameLength(t *testing.T) {
+	enc, err := NewEncoder(16000, 24000, 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkt, err := enc.Encode(make([]float32, 960))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := PacketSamples(pkt, 16000); err != nil || n != 960 {
+		t.Fatalf("PacketSamples = %d, %v; want 960", n, err)
+	}
+	if _, err := PacketSamples(nil, 16000); err == nil {
+		t.Fatal("PacketSamples accepted an empty packet")
+	}
+}

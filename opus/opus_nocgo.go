@@ -23,6 +23,11 @@ func (e *Encoder) Encode(pcm []float32) ([]byte, error) {
 	return nil, ErrUnavailable
 }
 
+// PacketSamples always returns ErrUnavailable in builds without cgo.
+func PacketSamples(pkt []byte, sampleRate int) (int, error) {
+	return 0, ErrUnavailable
+}
+
 // Decoder is a stub in builds without cgo; NewDecoder always fails.
 type Decoder struct{}
 

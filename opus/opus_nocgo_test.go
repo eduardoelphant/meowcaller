@@ -17,6 +17,9 @@ func TestStubReportsUnavailable(t *testing.T) {
 	if _, err := NewDecoder(16000); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("NewDecoder err = %v, want ErrUnavailable", err)
 	}
+	if _, err := PacketSamples([]byte{1}, 16000); !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("PacketSamples err = %v, want ErrUnavailable", err)
+	}
 	if out := (&Decoder{}).Decode([]byte{1, 2, 3}); out != nil {
 		t.Fatal("stub Decode returned samples")
 	}
