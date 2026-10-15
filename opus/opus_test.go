@@ -2,7 +2,10 @@
 
 package opus
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func TestRoundTripKeepsFrameLength(t *testing.T) {
 	enc, err := NewEncoder(16000, 24000, 5, true)
@@ -53,5 +56,40 @@ func TestPacketSamplesReportsFrameLength(t *testing.T) {
 	}
 	if _, err := PacketSamples(nil, 16000); err == nil {
 		t.Fatal("PacketSamples accepted an empty packet")
+	}
+}
+
+func TestStereoEncoderKeepsBothChannels(t *testing.T) {
+	enc, err := NewEncoderChannels(16000, 2, 48000, 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcm := make([]float32, 2*960)
+	for i := 0; i < 960; i++ {
+		pcm[2*i] = 0.3 * float32(math.Sin(2*math.Pi*440*float64(i)/16000))
+		pcm[2*i+1] = 0.3 * float32(math.Sin(2*math.Pi*1300*float64(i)/16000))
+	}
+	pkt, err := enc.Encode(pcm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pkt[0]&0x04 == 0 {
+		t.Fatalf("TOC 0x%02x: stereo flag not set", pkt[0])
+	}
+	if n, err := PacketSamples(pkt, 16000); err != nil || n != 960 {
+		t.Fatalf("packet holds %d samples per channel (%v), want 960", n, err)
+	}
+}
+
+func TestEncoderChannelsRejectsBadInput(t *testing.T) {
+	if _, err := NewEncoderChannels(16000, 3, 24000, 5, false); err == nil {
+		t.Fatal("3 channels must fail")
+	}
+	enc, err := NewEncoderChannels(16000, 2, 48000, 5, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := enc.Encode(make([]float32, 961)); err == nil {
+		t.Fatal("an odd stereo frame must fail")
 	}
 }

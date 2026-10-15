@@ -32,12 +32,14 @@ used by the Elphant fork of GOWA
 | RED audio, PT 122 (`audio_red.go`, `group_media_receive.go`) | WhatsApp Web callers in Opus mode sometimes send PT 122 (RED) instead of 120, and all of it was dropped. the blocks are parsed in RFC 2198 and in WhatsApp's SplitRed layout (a layout counts only with no block overrun plus plausibility checks: RFC 2198 blocks share the primary's PT and frame-aligned offsets, and in opus mode the primary must be one 960-sample Opus frame; RFC 2198 is tried first when plausible, the other layout if the primary does not decode), and the primary goes to the same decoder as PT 120; malformed payloads are dropped at Debug. A Debug line per call and payload type logs the first 8 decrypted bytes plus both parse results and the layout chosen, to confirm the layout live. PT 121 is unchanged |
 | `WithEarlyMedia` option (`early_media.go`, `engine.go`, `engine_media.go`) | Since PR #43, media while ringing made WhatsApp Web show the call as connected and stopped the callee's other devices ringing. `EarlyMediaOff` (default) starts media on Answer; `EarlyMediaListen` connects relays and allocates but sends no RTP or SRTCP until Answer; `EarlyMediaFull` keeps the PR #43 behaviour. Inbound 1:1 calls only: Off and Listen do not cover inbound group calls, where a `group_update` with relay and epoch while ringing may still start media |
 | `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
+| `opus.NewEncoderChannels` (`opus/opus.go`, `opus/opus_nocgo.go`) | Stereo encoder with forced stereo, for GOWA's call recorder (agent left, customer right, one Ogg Opus stream); `NewEncoder` is now the mono case of it |
 
 ## Versions
 
 - `v0.1.0-elphant.1`: FFT twiddle cache, dither, Opus mode and the libopus binding.
 - `v0.2.0-elphant.1`: relay fanout and stale offer gate (PR #26), media on the offer (PR #43),
   fixes on top of both, instrumentation, `WithOfferFilter` and the `!cgo` Opus stub.
+- `v0.2.0-elphant.5`: `opus.NewEncoderChannels` (stereo, forced channels) for GOWA's stereo call recording.
 
 ## Syncing with upstream
 

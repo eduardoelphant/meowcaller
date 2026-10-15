@@ -40,3 +40,8 @@ func NewDecoder(sampleRate int) (*Decoder, error) {
 func (d *Decoder) Decode(pkt []byte) []float32 {
 	return nil
 }
+
+// NewEncoderChannels always returns ErrUnavailable in builds without cgo.
+func NewEncoderChannels(sampleRate, channels, bitrate, complexity int, dtx bool) (*Encoder, error) {
+	return nil, ErrUnavailable
+}
