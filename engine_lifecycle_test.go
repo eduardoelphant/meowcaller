@@ -376,6 +376,37 @@ func TestOutgoingPeerRejectSendsTerminate(t *testing.T) {
 	}
 }
 
+func TestOutgoingPreAcceptNotifiesAfterMediaStarted(t *testing.T) {
+	eng, call := testEngineWithOutgoingCall()
+	call.setPhase(CallPhaseConnecting) // media started on the relay allocation
+	var rang int
+	call.OnPeerPreAccept(func() { rang++ })
+	from := types.JID{User: "222222222222222", Server: types.HiddenUserServer}
+
+	eng.onPreAccept(&events.CallPreAccept{BasicCallMeta: types.BasicCallMeta{CallID: "CID", From: from}})
+	eng.onPreAccept(&events.CallPreAccept{BasicCallMeta: types.BasicCallMeta{CallID: "CID", From: from}})
+
+	if rang != 1 {
+		t.Fatalf("OnPeerPreAccept fired %d times, want 1", rang)
+	}
+	if got := call.State(); got != CallPhaseConnecting {
+		t.Fatalf("phase = %d, want Connecting (no regression to Ringing)", got)
+	}
+}
+
+func TestOutgoingPreAcceptReplaysToLateCallback(t *testing.T) {
+	eng, call := testEngineWithOutgoingCall()
+	from := types.JID{User: "222222222222222", Server: types.HiddenUserServer}
+	eng.onPreAccept(&events.CallPreAccept{BasicCallMeta: types.BasicCallMeta{CallID: "CID", From: from}})
+
+	var rang int
+	call.OnPeerPreAccept(func() { rang++ })
+
+	if rang != 1 {
+		t.Fatalf("late OnPeerPreAccept fired %d times, want 1", rang)
+	}
+}
+
 func TestOutgoingPeerAcceptLifecycle(t *testing.T) {
 	eng, call := testEngineWithOutgoingCall()
 	from := types.JID{User: "222222222222222", Server: types.HiddenUserServer}

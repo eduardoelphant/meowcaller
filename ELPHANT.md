@@ -34,6 +34,7 @@ used by the Elphant fork of GOWA
 | `opus/` stub for `!cgo` builds (`opus/opus_nocgo.go`) | `CGO_ENABLED=0` builds compile; there `SetCodec("opus")` keeps MLow and returns `ErrOpusUnavailable`, and media falls back to MLow if an Opus constructor fails |
 | `opus.NewEncoderChannels` (`opus/opus.go`, `opus/opus_nocgo.go`) | Stereo encoder with forced stereo, for GOWA's call recorder (agent left, customer right, one Ogg Opus stream); `NewEncoder` is now the mono case of it |
 | Terminate after a peer reject on an outgoing call (`engine.go`) | A reject from one of the callee's devices (for example an integration that rejects calls automatically) ended the call here while WhatsApp kept ringing the callee's other devices; answering there left the callee in "reconnecting". The engine now sends a terminate after the reject, so the call ends everywhere |
+| `Call.OnPeerPreAccept` (`livecall.go`, `engine.go`) | Outgoing media starts on the relay allocation, which moves the phase to Connecting before the callee's preaccept, so `OnStateChange` never saw Ringing. A one-shot callback, replayed to a late registration, reports the first preaccept |
 
 ## Versions
 
@@ -42,6 +43,7 @@ used by the Elphant fork of GOWA
   fixes on top of both, instrumentation, `WithOfferFilter` and the `!cgo` Opus stub.
 - `v0.2.0-elphant.5`: `opus.NewEncoderChannels` (stereo, forced channels) for GOWA's stereo call recording.
 - `v0.2.0-elphant.6`: terminate after a peer reject on an outgoing call.
+- `v0.2.0-elphant.7`: `Call.OnPeerPreAccept`.
 
 ## Syncing with upstream
 

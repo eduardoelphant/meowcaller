@@ -964,6 +964,9 @@ func (e *engine) onPreAccept(ev *events.CallPreAccept) {
 	if m.call != nil && m.call.State() == CallPhaseCalling {
 		m.call.setPhase(CallPhaseRinging)
 	}
+	if m.call != nil {
+		m.call.markPeerPreAccepted()
+	}
 	if device, ok := inviteDeviceCapability(ev.From, ev.Data); ok {
 		e.mu.Lock()
 		if current := e.calls[ev.CallID]; current != nil {

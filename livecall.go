@@ -26,6 +26,9 @@ type Call struct {
 	onPeerAccept              func()
 	peerAccepted              bool
 	acceptNotified            bool
+	onPeerPreAccept           func()
+	peerPreAccepted           bool
+	preAcceptNotified         bool
 	onMuteState               func(muted bool)
 	videoSink                 VideoSink
 	onVideoState              func(VideoState)
@@ -730,6 +733,36 @@ func (c *Call) markPeerAccepted() {
 	shouldNotify := !c.acceptNotified && fn != nil
 	if shouldNotify {
 		c.acceptNotified = true
+	}
+	c.mu.Unlock()
+	if shouldNotify {
+		fn()
+	}
+}
+
+// OnPeerPreAccept registers a one-shot callback for the first peer device pre-accepting an
+// outgoing call (the callee's device rings). It fires even when media already moved the
+// phase past Ringing, and immediately if the preaccept arrived before registration.
+func (c *Call) OnPeerPreAccept(fn func()) {
+	c.mu.Lock()
+	c.onPeerPreAccept = fn
+	shouldNotify := c.peerPreAccepted && !c.preAcceptNotified && fn != nil
+	if shouldNotify {
+		c.preAcceptNotified = true
+	}
+	c.mu.Unlock()
+	if shouldNotify {
+		fn()
+	}
+}
+
+func (c *Call) markPeerPreAccepted() {
+	c.mu.Lock()
+	c.peerPreAccepted = true
+	fn := c.onPeerPreAccept
+	shouldNotify := !c.preAcceptNotified && fn != nil
+	if shouldNotify {
+		c.preAcceptNotified = true
 	}
 	c.mu.Unlock()
 	if shouldNotify {
