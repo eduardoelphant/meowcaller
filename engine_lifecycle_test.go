@@ -351,6 +351,27 @@ func TestHangupTearsDownLocallyWhenSignalingFails(t *testing.T) {
 	}
 }
 
+func TestIncomingRejectFromOwnDeviceIsIgnored(t *testing.T) {
+	c := &Client{}
+	c.eng = newEngine(c)
+	call := &Call{eng: c.eng, id: "CID", peer: peerJID(), phase: CallPhaseRinging}
+	c.eng.calls["CID"] = &engineCall{call: call, direction: CallDirectionIncoming, from: peerJID(), creator: peerJID()}
+	var sent int
+	c.eng.sendCallNode = func(context.Context, waBinary.Node) error { sent++; return nil }
+	ended := false
+	call.OnEnd(func(string) { ended = true })
+	hosted := types.JID{User: "111111111111111", Device: 99, Server: types.HostedLIDServer}
+
+	c.eng.onReject(&events.CallReject{BasicCallMeta: types.BasicCallMeta{CallID: "CID", From: hosted}})
+
+	if ended || call.State() != CallPhaseRinging || c.eng.lookup("CID") == nil {
+		t.Fatalf("incoming call ended on an own-device reject (ended=%v, phase=%d)", ended, call.State())
+	}
+	if sent != 0 {
+		t.Fatalf("sent %d stanzas, want none", sent)
+	}
+}
+
 func TestOutgoingPeerRejectSendsTerminate(t *testing.T) {
 	eng, call := testEngineWithOutgoingCall()
 	var sent []waBinary.Node

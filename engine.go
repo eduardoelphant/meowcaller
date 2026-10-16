@@ -1098,6 +1098,21 @@ func (e *engine) onReject(ev *events.CallReject) {
 	if m == nil {
 		return
 	}
+	e.mu.Lock()
+	incoming := m.direction == CallDirectionIncoming
+	e.mu.Unlock()
+	if incoming {
+		// A reject on an incoming call comes from another device of our own account, such as
+		// the Cloud API's hosted companion on a coexistence number, which declines every call.
+		// It does not end the call for the account: the phone keeps ringing, and a real decline
+		// or answer elsewhere arrives as a terminate. Ending here dropped calls the phone could
+		// still take.
+		e.c.log.Info().
+			Str("call_id", ev.CallID).
+			Str("from", ev.From.String()).
+			Msg("ignoring a reject from another own device on an incoming call")
+		return
+	}
 	e.c.log.Info().
 		Str("call_id", ev.CallID).
 		Str("from", ev.From.String()).
